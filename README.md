@@ -27,6 +27,8 @@ O APK de depuração será gerado em `android-app/app/build/outputs/apk/debug/ap
 
 O workflow do GitHub Actions compila um APK de depuração para testes. Em uma versão marcada `v*`, cria uma release pública com `jmdroid.apk`. A URL estável para baixar a versão mais recente é [github.com/deggau/jmdDroid/releases/latest/download/jmdroid.apk](https://github.com/deggau/jmdDroid/releases/latest/download/jmdroid.apk).
 
+Ao preparar cada release, incremente `versionCode` (número inteiro, sempre crescente) e atualize `versionName` (versão exibida na tela inicial do app) em `android-app/app/build.gradle.kts`. A tag `vX.Y.Z` precisa corresponder ao `versionName`; o workflow verifica essa correspondência antes de compilar e publicar. A versão atual é `0.4.0` (build `4`).
+
 O app consulta a release mais recente ao abrir e também oferece o botão **Verificar atualizações**. Quando encontra uma versão nova, baixa o APK, confere o SHA-256 publicado pelo GitHub e abre o instalador do Android. O Android exige confirmação da instalação e pode pedir que você permita instalações desta fonte; o app não consegue instalar atualizações silenciosamente.
 
 Para conectar ao JMD desktop, abra **Configurações > Android > Conectar** no computador e, no JMDroid, toque em **Ler QR code do JMD**. Autorize o uso da câmera e aponte para o código; o app valida o certificado HTTPS pela impressão digital no QR, guarda o token cifrado pelo Android Keystore, mantém uma sessão autenticada e permite listar/executar comandos remotos habilitados no JMD. Celular e computador precisam estar na mesma rede local.
