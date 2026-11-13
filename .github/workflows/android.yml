@@ -34,15 +34,42 @@ jobs:
         with:
           gradle-version: '8.11.1'
 
-      - name: Build debug APK
+      - name: Prepare stable release signing
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          KEYSTORE_B64: ${{ secrets.JMDROID_SIGNING_KEYSTORE_B64 }}
+        run: |
+          test -n "$KEYSTORE_B64"
+          mkdir -p "$RUNNER_TEMP/jmdroid-signing"
+          printf '%s' "$KEYSTORE_B64" | base64 --decode > "$RUNNER_TEMP/jmdroid-signing/jmdroid-release.jks"
+          echo "JMDROID_SIGNING_STORE_FILE=$RUNNER_TEMP/jmdroid-signing/jmdroid-release.jks" >> "$GITHUB_ENV"
+
+      - name: Build APK
         working-directory: android-app
-        run: gradle assembleDebug
+        env:
+          JMDROID_SIGNING_PASSWORD: ${{ secrets.JMDROID_SIGNING_PASSWORD }}
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            gradle assembleRelease
+          else
+            gradle assembleDebug
+          fi
 
       - name: Save debug APK
+        if: "!startsWith(github.ref, 'refs/tags/v')"
         uses: actions/upload-artifact@v4
         with:
           name: jmdroid-debug-apk
           path: android-app/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Save signed release APK
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: actions/upload-artifact@v4
+        with:
+          name: jmdroid-release-apk
+          path: android-app/app/build/outputs/apk/release/app-release.apk
           if-no-files-found: error
           retention-days: 14
 
@@ -53,17 +80,17 @@ jobs:
     permissions:
       contents: write
     steps:
-      - name: Download debug APK
+      - name: Download signed release APK
         uses: actions/download-artifact@v4
         with:
-          name: jmdroid-debug-apk
+          name: jmdroid-release-apk
           path: dist
 
       - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          cp dist/app-debug.apk dist/jmdroid.apk
+          cp dist/app-release.apk dist/jmdroid.apk
           gh release create "$GITHUB_REF_NAME" dist/jmdroid.apk \
             --repo "$GITHUB_REPOSITORY" \
             --title "JMDroid $GITHUB_REF_NAME" \

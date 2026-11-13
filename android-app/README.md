@@ -2,11 +2,15 @@
 
 Aplicativo Android nativo em Kotlin para conectar ao JMD executado no computador.
 
-## Primeira versão
+## Recursos
 
-A tela de diagnóstico mostra fabricante, modelo e versão do Android e permite copiar esses dados. Não pede permissões especiais. A integração com o computador depende de definirmos um protocolo de pareamento e autenticação para o JMD desktop.
+A tela de diagnóstico mostra fabricante, modelo e versão do Android e permite copiar esses dados. O app também pareia com o JMD desktop após aprovação no computador, mantém uma sessão autenticada, lista os comandos remotos disponíveis e permite enviar texto para execução e copiar o resultado.
 
-Os próximos recursos devem ser adicionados por etapas. O app deve explicar cada compartilhamento e iniciar captura de tela ou controle somente após confirmação explícita no Android. Acesso a notificações e SMS também exige permissões e telas de consentimento próprias; não serão solicitados até que a função correspondente exista.
+Para parear, abra **Configurações > Android > Conectar** no JMD desktop e toque em **Ler QR code do JMD** no app. Ao autorizar a câmera, o JMDroid lê o código no próprio aparelho, valida o certificado HTTPS pela impressão digital incluída no QR, aguarda a aprovação explícita no desktop e protege o token com uma chave do Android Keystore. Os dois aparelhos precisam estar na mesma rede local; não exponha a porta do JMD à internet. Também há a opção de colar manualmente o conteúdo JSON.
+
+O JMDroid só lista e executa os comandos que o JMD marca como disponíveis para acesso remoto. Cada execução envia o texto informado no app ao computador; o app não lê mensagens, notificações nem a tela do aparelho.
+
+Captura de tela, operação remota do aparelho, notificações e SMS ainda não estão implementados. Esses recursos devem explicar cada compartilhamento e pedir as permissões/consentimentos próprios do Android quando forem adicionados.
 
 ## Gerar APK
 
