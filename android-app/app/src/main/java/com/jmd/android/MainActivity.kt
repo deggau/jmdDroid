@@ -16,10 +16,11 @@ import android.view.Gravity
 import android.view.View
 import android.widget.Button
 import android.widget.EditText
+import android.widget.FrameLayout
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
-import android.widget.Toast
 import androidx.core.content.FileProvider
 import org.json.JSONObject
 import java.io.File
@@ -43,6 +44,7 @@ class MainActivity : Activity() {
     private val textMuted by lazy { getColor(R.color.jmd_muted) }
     private val border by lazy { getColor(R.color.jmd_border) }
     private val backgroundExecutor = Executors.newSingleThreadExecutor()
+    private val messageHandler = android.os.Handler(android.os.Looper.getMainLooper())
     private lateinit var credentialStore: JmdroidCredentialStore
     private lateinit var connectionStatus: TextView
     private lateinit var pairingButton: Button
@@ -57,6 +59,11 @@ class MainActivity : Activity() {
     private lateinit var updateButton: Button
     private var availableUpdate: GithubRelease? = null
     private var pendingApk: File? = null
+    private lateinit var appMessageBanner: LinearLayout
+    private lateinit var appMessageText: TextView
+    private val hideAppMessage = Runnable {
+        if (::appMessageBanner.isInitialized) appMessageBanner.visibility = View.GONE
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -104,7 +111,7 @@ class MainActivity : Activity() {
             setOnClickListener {
                 val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
                 clipboard.setPrimaryClip(ClipData.newPlainText("Diagnóstico JMDroid", details))
-                Toast.makeText(this@MainActivity, "Dados copiados", Toast.LENGTH_SHORT).show()
+                showBrandedMessage("Dados copiados")
             }
         }, marginParams(top = 20))
 
@@ -113,20 +120,68 @@ class MainActivity : Activity() {
             setPadding(0, dp(24), 0, 0)
         })
 
-        setContentView(ScrollView(this).apply {
+        val scrollView = ScrollView(this).apply {
             isFillViewport = true
             setBackgroundColor(surface)
             addView(page)
+        }
+        val screen = FrameLayout(this)
+        screen.addView(scrollView, FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.MATCH_PARENT,
+            FrameLayout.LayoutParams.MATCH_PARENT
+        ))
+        appMessageText = TextView(this).apply {
+            textSize = 14f
+            typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+            setTextColor(textPrimary)
+            gravity = Gravity.CENTER_VERTICAL
+            maxLines = 2
+        }
+        appMessageBanner = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(14), dp(12), dp(18), dp(12))
+            background = rounded(card, border, 14f)
+            elevation = dp(8).toFloat()
+            visibility = View.GONE
+            accessibilityLiveRegion = View.ACCESSIBILITY_LIVE_REGION_POLITE
+            addView(ImageView(this@MainActivity).apply {
+                setImageResource(R.mipmap.ic_launcher)
+                scaleType = ImageView.ScaleType.FIT_CENTER
+                importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+            }, LinearLayout.LayoutParams(dp(32), dp(32)))
+            addView(appMessageText, LinearLayout.LayoutParams(
+                0,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                1f
+            ).apply { marginStart = dp(12) })
+        }
+        screen.addView(appMessageBanner, FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.MATCH_PARENT,
+            FrameLayout.LayoutParams.WRAP_CONTENT,
+            Gravity.BOTTOM
+        ).apply {
+            setMargins(dp(20), 0, dp(20), dp(48))
         })
+        setContentView(screen)
         checkForUpdate(showCurrent = false)
         pairedJmd?.let { connectToJmd(it, loadCommands = true) }
     }
 
     override fun onDestroy() {
+        messageHandler.removeCallbacks(hideAppMessage)
         backgroundExecutor.shutdownNow()
         jmdWebSocket?.close(1000, "App fechado")
         jmdApiClient?.close()
         super.onDestroy()
+    }
+
+    private fun showBrandedMessage(message: String, durationMs: Long = 2_500L) {
+        if (!::appMessageBanner.isInitialized || isFinishing) return
+        appMessageText.text = message
+        appMessageBanner.visibility = View.VISIBLE
+        messageHandler.removeCallbacks(hideAppMessage)
+        messageHandler.postDelayed(hideAppMessage, durationMs)
     }
 
     @Deprecated("Use the activity result API")
@@ -495,7 +550,7 @@ class MainActivity : Activity() {
                             setOnClickListener { showCommandInput(command) }
                             if (!command.available && !command.unavailableReason.isNullOrBlank()) {
                                 setOnLongClickListener {
-                                    Toast.makeText(this@MainActivity, command.unavailableReason, Toast.LENGTH_LONG).show()
+                                    showBrandedMessage(command.unavailableReason, 3_500L)
                                     true
                                 }
                             }
@@ -574,7 +629,7 @@ class MainActivity : Activity() {
             .setPositiveButton("Copiar") { _, _ ->
                 val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
                 clipboard.setPrimaryClip(ClipData.newPlainText("Resultado JMD", output))
-                Toast.makeText(this, "Resultado copiado", Toast.LENGTH_SHORT).show()
+                showBrandedMessage("Resultado copiado")
             }
             .show()
     }
@@ -619,14 +674,14 @@ class MainActivity : Activity() {
                         availableUpdate = null
                         updateButton.text = "Verificar atualizações"
                         updateStatus.text = "Você está na versão mais recente (${BuildConfig.VERSION_NAME})."
-                        if (showCurrent) Toast.makeText(this, "JMDroid já está atualizado", Toast.LENGTH_SHORT).show()
+                        if (showCurrent) showBrandedMessage("JMDroid já está atualizado")
                     }
                 }
             } catch (_: Exception) {
                 runOnUiThread {
                     updateButton.isEnabled = true
                     updateStatus.text = "Não foi possível consultar o GitHub. Verifique sua conexão."
-                    if (showCurrent) Toast.makeText(this, "Falha ao verificar atualizações", Toast.LENGTH_SHORT).show()
+                    if (showCurrent) showBrandedMessage("Falha ao verificar atualizações")
                 }
             }
         }
@@ -688,7 +743,7 @@ class MainActivity : Activity() {
                 runOnUiThread {
                     updateButton.isEnabled = true
                     updateStatus.text = "Não foi possível baixar a atualização. Tente novamente."
-                    Toast.makeText(this, "Falha ao baixar a atualização", Toast.LENGTH_SHORT).show()
+                    showBrandedMessage("Falha ao baixar a atualização")
                 }
             }
         }
