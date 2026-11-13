@@ -65,5 +65,6 @@ jobs:
         run: |
           cp dist/app-debug.apk dist/jmdroid.apk
           gh release create "$GITHUB_REF_NAME" dist/jmdroid.apk \
+            --repo "$GITHUB_REPOSITORY" \
             --title "JMDroid $GITHUB_REF_NAME" \
             --generate-notes
