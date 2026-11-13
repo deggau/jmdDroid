@@ -6,6 +6,8 @@ Aplicativo Android para, em etapas, conectar o celular ao JMD executado no compu
 
 A primeira versão contém um diagnóstico local (fabricante, modelo e versão do Android) com opção para copiar os dados. Ela não solicita permissões especiais. Conexão, leitura de notificações/mensagens, captura de tela e operação remota serão implementadas separadamente, com indicação clara do que será compartilhado e confirmação no próprio aparelho. Permissões especiais do Android, como captura de tela e Acessibilidade, não podem ser concedidas silenciosamente pelo app.
 
+O Android usa a mesma identidade do JMD desktop: fundo `#17191F`, cartões `#22252D`, verde `#B4F36A` e textos `#F0F1F4`/`#969BA7`.
+
 ## Build
 
 O JDK 17 e Gradle 8.11.1 usados neste ambiente WSL ficam em `.tools/` (não são enviados ao Git). Para ativá-los no terminal:

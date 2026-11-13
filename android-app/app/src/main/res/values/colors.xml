@@ -1,0 +1,10 @@
+<resources>
+    <color name="jmd_ink">#17191F</color>
+    <color name="jmd_surface">#17191F</color>
+    <color name="jmd_card">#22252D</color>
+    <color name="jmd_accent">#B4F36A</color>
+    <color name="jmd_accent_tint">#293224</color>
+    <color name="jmd_muted">#969BA7</color>
+    <color name="jmd_text">#F0F1F4</color>
+    <color name="jmd_border">#3A3E48</color>
+</resources>
