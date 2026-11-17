@@ -191,7 +191,7 @@ class MainActivity : Activity() {
             if (resultCode == RESULT_OK) {
                 val rawQr = data?.getStringExtra(QR_SCAN_RESULT).orEmpty()
                 try {
-                    startPairing(JmdroidApiClient.parsePairingQr(rawQr))
+                    confirmPairingTransport(JmdroidApiClient.parsePairingQr(rawQr))
                 } catch (error: Exception) {
                     AlertDialog.Builder(this)
                         .setTitle("QR code inválido")
@@ -442,7 +442,7 @@ class MainActivity : Activity() {
                             return@setOnClickListener
                         }
                         dialog.dismiss()
-                        startPairing(qr)
+                        confirmPairingTransport(qr)
                     }
                 }
                 dialog.show()
@@ -470,6 +470,19 @@ class MainActivity : Activity() {
                 }
             }
         }
+    }
+
+    private fun confirmPairingTransport(qr: PairingQr) {
+        if (!qr.baseUrl.startsWith("http://", ignoreCase = true)) {
+            startPairing(qr)
+            return
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Usar conexão HTTP?")
+            .setMessage("O segredo de pareamento e o token serão enviados sem criptografia. Continue somente em uma rede interna confiável.")
+            .setNegativeButton("Cancelar", null)
+            .setPositiveButton("Continuar") { _, _ -> startPairing(qr) }
+            .show()
     }
 
     private fun connectToJmd(paired: PairedJmd, loadCommands: Boolean) {
