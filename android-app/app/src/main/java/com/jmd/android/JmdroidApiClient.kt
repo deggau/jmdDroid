@@ -92,6 +92,10 @@ internal class JmdroidApiClient(private val paired: PairedJmd) {
         }
     }
 
+    fun healthCheck() {
+        request("GET", "/api/v1/health")
+    }
+
     fun execute(commandId: String, text: String): JSONObject {
         require(commandId.matches(Regex("[A-Za-z0-9_-]{1,80}"))) { "ID de comando inválido." }
         val input = JSONObject().put("text", text)

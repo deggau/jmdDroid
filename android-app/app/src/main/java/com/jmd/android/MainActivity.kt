@@ -7,6 +7,7 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.graphics.Typeface
+import android.graphics.Color
 import android.graphics.drawable.GradientDrawable
 import android.net.Uri
 import android.os.Build
@@ -14,11 +15,14 @@ import android.os.Bundle
 import android.provider.Settings
 import android.view.Gravity
 import android.view.View
+import android.text.Editable
+import android.text.TextWatcher
 import android.widget.Button
 import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
+import android.widget.PopupMenu
 import android.widget.ScrollView
 import android.widget.TextView
 import androidx.core.content.FileProvider
@@ -44,13 +48,22 @@ class MainActivity : Activity() {
     private val textMuted by lazy { getColor(R.color.jmd_muted) }
     private val border by lazy { getColor(R.color.jmd_border) }
     private val backgroundExecutor = Executors.newSingleThreadExecutor()
+    private val healthExecutor = Executors.newSingleThreadExecutor()
     private val messageHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    private val healthCheckRunnable = object : Runnable {
+        override fun run() {
+            checkJmdHealth()
+            if (!isFinishing && pairedJmd != null) messageHandler.postDelayed(this, 10_000)
+        }
+    }
     private lateinit var credentialStore: JmdroidCredentialStore
     private lateinit var connectionStatus: TextView
+    private lateinit var connectionDot: View
+    private lateinit var connectionLabel: TextView
     private lateinit var pairingButton: Button
-    private lateinit var reconnectButton: Button
     private lateinit var commandContainer: LinearLayout
     private lateinit var commandSearch: EditText
+    private var allCommands: List<RemoteCommand> = emptyList()
     private var pairedJmd: PairedJmd? = null
     private var jmdApiClient: JmdroidApiClient? = null
     private var jmdWebSocket: WebSocket? = null
@@ -71,7 +84,6 @@ class MainActivity : Activity() {
         window.navigationBarColor = surface
         window.decorView.systemUiVisibility = 0
 
-        val details = deviceDetails()
         credentialStore = JmdroidCredentialStore(this)
         pairedJmd = credentialStore.load()
         val page = LinearLayout(this).apply {
@@ -81,13 +93,13 @@ class MainActivity : Activity() {
         }
 
         page.addView(buildHeader())
-        page.addView(label("DIAGNÓSTICO LOCAL", accent).apply {
+        page.addView(label("CONTROLE REMOTO", accent).apply {
             letterSpacing = 0.14f
             setPadding(0, dp(34), 0, dp(8))
         })
-        page.addView(label("Seu aparelho", textPrimary, 30f, Typeface.create("sans-serif", Typeface.BOLD)))
+        page.addView(label("Comandos", textPrimary, 30f, Typeface.create("sans-serif", Typeface.BOLD)))
         page.addView(label(
-            "Identificação do dispositivo para preparar a conexão com o JMD no computador.",
+            "Consulte e execute no celular os comandos disponíveis no JMD desktop.",
             textMuted,
             15f
         ).apply {
@@ -95,25 +107,7 @@ class MainActivity : Activity() {
             setPadding(0, dp(8), 0, dp(22))
         })
 
-        page.addView(buildDeviceCard())
         page.addView(buildRemoteCard(), marginParams(top = 16))
-        page.addView(buildUpdateCard(), marginParams(top = 16))
-        page.addView(buildPrivacyNote())
-        page.addView(Button(this).apply {
-            text = "Copiar dados do aparelho"
-            textSize = 15f
-            typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
-            isAllCaps = false
-            setTextColor(ink)
-            background = rounded(accent, accent, 14f)
-            minHeight = dp(54)
-            setPadding(dp(18), 0, dp(18), 0)
-            setOnClickListener {
-                val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                clipboard.setPrimaryClip(ClipData.newPlainText("Diagnóstico JMDroid", details))
-                showBrandedMessage("Dados copiados")
-            }
-        }, marginParams(top = 20))
 
         page.addView(label("JMDROID  ·  ${BuildConfig.VERSION_NAME}", textMuted, 12f).apply {
             gravity = Gravity.CENTER
@@ -164,13 +158,17 @@ class MainActivity : Activity() {
             setMargins(dp(20), 0, dp(20), dp(48))
         })
         setContentView(screen)
-        checkForUpdate(showCurrent = false)
-        pairedJmd?.let { connectToJmd(it, loadCommands = true) }
+        pairedJmd?.let {
+            connectToJmd(it, loadCommands = true)
+            scheduleHealthChecks()
+        }
     }
 
     override fun onDestroy() {
         messageHandler.removeCallbacks(hideAppMessage)
+        messageHandler.removeCallbacks(healthCheckRunnable)
         backgroundExecutor.shutdownNow()
+        healthExecutor.shutdownNow()
         jmdWebSocket?.close(1000, "App fechado")
         jmdApiClient?.close()
         super.onDestroy()
@@ -234,20 +232,29 @@ class MainActivity : Activity() {
             addView(label("JMD para Android", textMuted, 13f).apply { setPadding(0, dp(2), 0, 0) })
         }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
 
-        val localTag = LinearLayout(this@MainActivity).apply {
+        val statusTag = LinearLayout(this@MainActivity).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            background = rounded(getColor(R.color.jmd_accent_tint), getColor(R.color.jmd_accent_tint), 20f)
+            background = rounded(card, border, 20f)
             setPadding(dp(10), dp(7), dp(10), dp(7))
-            addView(View(this@MainActivity).apply {
-                background = rounded(accent, accent, 8f)
-            }, LinearLayout.LayoutParams(dp(7), dp(7)))
-            addView(label("LOCAL", accent, 11f, Typeface.create("sans-serif-medium", Typeface.NORMAL)).apply {
-                letterSpacing = 0.08f
+            connectionDot = View(this@MainActivity).apply { background = rounded(Color.RED, Color.RED, 8f) }
+            addView(connectionDot, LinearLayout.LayoutParams(dp(8), dp(8)))
+            connectionLabel = label("OFFLINE", textMuted, 10f, Typeface.create("sans-serif-medium", Typeface.NORMAL)).apply {
+                letterSpacing = 0.05f
                 setPadding(dp(6), 0, 0, 0)
-            })
+            }
+            addView(connectionLabel)
         }
-        addView(localTag)
+        addView(statusTag)
+        addView(TextView(this@MainActivity).apply {
+            text = "⋮"
+            textSize = 25f
+            gravity = Gravity.CENTER
+            setTextColor(textPrimary)
+            contentDescription = "Mais opções"
+            setOnClickListener { showSecondaryMenu(this) }
+        }, LinearLayout.LayoutParams(dp(44), dp(48)).apply { marginStart = dp(4) })
+        refreshConnectionIndicator(false)
     }
 
     private fun buildDeviceCard(): View = LinearLayout(this).apply {
@@ -325,7 +332,7 @@ class MainActivity : Activity() {
         }
         addView(updateButton, marginParams())
 
-        updateStatus = label("Verificação automática ao abrir o app.", textMuted, 12f).apply {
+        updateStatus = label("Toque para consultar a versão mais recente no GitHub.", textMuted, 12f).apply {
             setPadding(0, dp(10), 0, 0)
         }
         addView(updateStatus)
@@ -336,43 +343,33 @@ class MainActivity : Activity() {
         setPadding(dp(18), dp(18), dp(18), dp(18))
         background = rounded(card, border, 16f)
 
-        addView(label("CONTROLE PELO JMD", accent, 11f, Typeface.create("sans-serif-medium", Typeface.NORMAL)).apply {
+        addView(label("JMD DESKTOP", accent, 11f, Typeface.create("sans-serif-medium", Typeface.NORMAL)).apply {
             letterSpacing = 0.12f
         })
-        addView(label("Conectar ao computador", textPrimary, 18f, Typeface.create("sans-serif-medium", Typeface.NORMAL)).apply {
+        addView(label(if (pairedJmd == null) "Conecte seu computador" else "Comandos disponíveis", textPrimary, 18f, Typeface.create("sans-serif-medium", Typeface.NORMAL)).apply {
             setPadding(0, dp(6), 0, dp(3))
         })
-        addView(label("Pareie com aprovação no JMD desktop para consultar e executar comandos remotos disponíveis.", textMuted, 13f).apply {
+        addView(label(if (pairedJmd == null) "Conecte ao JMD desktop para consultar e executar comandos." else "Toque em um comando para informar o texto e executá-lo no computador.", textMuted, 13f).apply {
             setLineSpacing(dp(2).toFloat(), 1f)
             setPadding(0, 0, 0, dp(12))
         })
-        connectionStatus = label("Sem computador pareado.", textMuted, 12f)
+        connectionStatus = label(if (pairedJmd == null) "Nenhum JMD conectado." else "Verificando conexão com o computador…", textMuted, 12f)
         addView(connectionStatus)
         pairingButton = Button(this@MainActivity).apply {
-            text = if (pairedJmd == null) "Ler QR code do JMD" else "Parear outro computador"
+            text = if (pairedJmd == null) "Conectar ao JMD" else "Reconectar ao JMD"
             textSize = 14f
             typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
             isAllCaps = false
             setTextColor(ink)
             background = rounded(accent, accent, 12f)
             minHeight = dp(48)
-            setOnClickListener { showPairingOptions() }
-        }
-        addView(pairingButton, marginParams(top = 10))
-        reconnectButton = Button(this@MainActivity).apply {
-            text = "Conectar novamente"
-            textSize = 13f
-            isAllCaps = false
-            setTextColor(accent)
-            background = rounded(surface, border, 12f)
-            minHeight = dp(42)
-            visibility = if (pairedJmd == null) View.GONE else View.VISIBLE
             setOnClickListener {
-                if (jmdSessionReady) loadRemoteCommands(commandSearch.text.toString())
-                else pairedJmd?.let { connectToJmd(it, loadCommands = true) }
+                val paired = pairedJmd
+                if (paired == null) showPairingOptions() else connectToJmd(paired, loadCommands = true)
             }
         }
-        addView(reconnectButton, marginParams(top = 6))
+        addView(pairingButton, marginParams(top = 10))
+        pairingButton.visibility = View.VISIBLE
 
         commandSearch = EditText(this@MainActivity).apply {
             hint = "Filtrar comandos"
@@ -384,20 +381,18 @@ class MainActivity : Activity() {
             background = rounded(surface, border, 10f)
         }
         addView(commandSearch, marginParams(top = 16))
-        addView(Button(this@MainActivity).apply {
-            text = "Carregar comandos"
-            textSize = 14f
-            isAllCaps = false
-            setTextColor(accent)
-            background = rounded(surface, border, 12f)
-            minHeight = dp(44)
-            setOnClickListener { loadRemoteCommands(commandSearch.text.toString()) }
-        }, marginParams(top = 8))
+        commandSearch.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = Unit
+            override fun afterTextChanged(s: Editable?) = renderCommands(s?.toString().orEmpty())
+        })
         commandContainer = LinearLayout(this@MainActivity).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(0, dp(8), 0, 0)
         }
         addView(commandContainer)
+        commandSearch.visibility = if (pairedJmd == null) View.GONE else View.VISIBLE
+        commandContainer.visibility = if (pairedJmd == null) View.GONE else View.VISIBLE
         refreshConnectionStatus()
     }
 
@@ -413,6 +408,118 @@ class MainActivity : Activity() {
             }
             .setNegativeButton("Cancelar", null)
             .show()
+    }
+
+    private fun showSecondaryMenu(anchor: View) {
+        PopupMenu(this, anchor).apply {
+            menu.add("Informações do aparelho").setOnMenuItemClickListener {
+                AlertDialog.Builder(this@MainActivity)
+                    .setTitle("Informações do aparelho")
+                    .setMessage(deviceDetails())
+                    .setNegativeButton("Fechar", null)
+                    .setPositiveButton("Copiar dados") { _, _ ->
+                        val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                        clipboard.setPrimaryClip(ClipData.newPlainText("Diagnóstico JMDroid", deviceDetails()))
+                        showBrandedMessage("Dados copiados")
+                    }.show()
+                true
+            }
+            menu.add("Verificar atualizações").setOnMenuItemClickListener {
+                AlertDialog.Builder(this@MainActivity)
+                    .setTitle("Atualizações")
+                    .setView(buildUpdateCard())
+                    .setNegativeButton("Fechar", null)
+                    .show()
+                availableUpdate?.let(::showUpdateDialog)
+                true
+            }
+            if (pairedJmd == null) {
+                menu.add("Conectar a um JMD").setOnMenuItemClickListener {
+                    showPairingOptions()
+                    true
+                }
+            } else {
+                menu.add("Conectar novamente").setOnMenuItemClickListener {
+                    pairedJmd?.let { connectToJmd(it, loadCommands = true) }
+                    true
+                }
+                menu.add("Conectar a outro JMD").setOnMenuItemClickListener {
+                    showPairingOptions()
+                    true
+                }
+                menu.add("Desconectar").setOnMenuItemClickListener {
+                    disconnectFromJmd()
+                    true
+                }
+            }
+            show()
+        }
+    }
+
+    private fun disconnectFromJmd() {
+        messageHandler.removeCallbacks(healthCheckRunnable)
+        jmdWebSocket?.close(1000, "Desconectado pelo usuário")
+        jmdWebSocket = null
+        jmdApiClient?.close()
+        jmdApiClient = null
+        jmdSessionReady = false
+        pairedJmd = null
+        allCommands = emptyList()
+        credentialStore.clear()
+        pairingButton.visibility = View.VISIBLE
+        commandSearch.visibility = View.GONE
+        commandContainer.visibility = View.GONE
+        connectionStatus.text = "Nenhum JMD conectado."
+        refreshConnectionIndicator(false)
+        showBrandedMessage("Desconectado do JMD")
+    }
+
+    private fun refreshConnectionIndicator(connected: Boolean) {
+        if (!::connectionDot.isInitialized) return
+        val color = if (connected) Color.rgb(76, 175, 80) else Color.rgb(229, 83, 83)
+        connectionDot.background = rounded(color, color, 8f)
+        connectionLabel.text = if (connected) "CONECTADO" else "OFFLINE"
+        connectionLabel.setTextColor(if (connected) color else textMuted)
+        if (::pairingButton.isInitialized) {
+            pairingButton.text = if (pairedJmd == null) "Conectar ao JMD" else "Reconectar ao JMD"
+            pairingButton.visibility = if (pairedJmd == null || !connected) View.VISIBLE else View.GONE
+        }
+        if (::connectionStatus.isInitialized && pairedJmd == null) connectionStatus.text = "Nenhum JMD conectado."
+    }
+
+    private fun scheduleHealthChecks() {
+        messageHandler.removeCallbacks(healthCheckRunnable)
+        healthCheckRunnable.run()
+    }
+
+    private fun checkJmdHealth() {
+        val paired = pairedJmd ?: run {
+            refreshConnectionIndicator(false)
+            return
+        }
+        val client = jmdApiClient ?: JmdroidApiClient(paired).also { jmdApiClient = it }
+        healthExecutor.execute {
+            var failure: Exception? = null
+            val connected = try {
+                client.healthCheck()
+                true
+            } catch (error: Exception) {
+                failure = error
+                false
+            }
+            runOnUiThread {
+                if (pairedJmd?.deviceId == paired.deviceId) {
+                    val error = failure
+                    if (error is ApiException && error.status in setOf(401, 403)) {
+                        connectionStatus.text = apiErrorMessage(error)
+                        return@runOnUiThread
+                    }
+                    refreshConnectionIndicator(connected)
+                    if (connected) connectionStatus.text = "API do JMD disponível · toque em um comando para executar."
+                    else connectionStatus.text = "Sem resposta do JMD. Verifique a rede ou tente novamente no menu."
+                }
+            }
+        }
     }
 
     private fun showManualPairingInput() {
@@ -459,9 +566,11 @@ class MainActivity : Activity() {
                 runOnUiThread {
                     pairedJmd = paired
                     pairingButton.isEnabled = true
-                    pairingButton.text = "Parear outro computador"
-                    reconnectButton.visibility = View.VISIBLE
+                    pairingButton.visibility = View.GONE
+                    commandSearch.visibility = View.VISIBLE
+                    commandContainer.visibility = View.VISIBLE
                     connectToJmd(paired, loadCommands = true)
+                    scheduleHealthChecks()
                 }
             } catch (error: Exception) {
                 runOnUiThread {
@@ -486,6 +595,8 @@ class MainActivity : Activity() {
     }
 
     private fun connectToJmd(paired: PairedJmd, loadCommands: Boolean) {
+        jmdWebSocket?.close(1000, "Reconectando")
+        jmdApiClient?.close()
         jmdApiClient = JmdroidApiClient(paired)
         connectionStatus.text = "Conectando à sessão segura do JMD…"
         val socket = try {
@@ -493,8 +604,8 @@ class MainActivity : Activity() {
                 override fun onOpen(webSocket: WebSocket, response: Response) {
                     runOnUiThread {
                         jmdSessionReady = true
-                        connectionStatus.text = "Conectado ao JMD · ${paired.baseUrl.substringAfter("//").substringBefore(":")}"
-                        if (loadCommands) loadRemoteCommands("")
+                        connectionStatus.text = "Sessão ativa no JMD."
+                        if (loadCommands) loadRemoteCommands()
                     }
                 }
 
@@ -505,19 +616,24 @@ class MainActivity : Activity() {
 
                 override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
                     runOnUiThread {
+                        if (jmdWebSocket !== webSocket) return@runOnUiThread
                         jmdSessionReady = false
-                        connectionStatus.text = "Sessão do JMD encerrada. Toque em ‘Conectar novamente’ para tentar outra vez."
+                        connectionStatus.text = "Sessão do JMD encerrada."
                     }
                 }
 
                 override fun onFailure(webSocket: WebSocket, error: Throwable, response: Response?) {
                     runOnUiThread {
+                        if (jmdWebSocket !== webSocket) return@runOnUiThread
                         jmdSessionReady = false
                         if (response?.code == 401 || response?.code == 403) {
                             credentialStore.clear()
                             pairedJmd = null
-                            pairingButton.text = "Ler QR code do JMD"
-                            reconnectButton.visibility = View.GONE
+                            pairingButton.visibility = View.VISIBLE
+                            commandSearch.visibility = View.GONE
+                            commandContainer.visibility = View.GONE
+                            messageHandler.removeCallbacks(healthCheckRunnable)
+                            refreshConnectionIndicator(false)
                         }
                         connectionStatus.text = error.message ?: "Conexão com o JMD interrompida."
                     }
@@ -531,7 +647,7 @@ class MainActivity : Activity() {
         jmdWebSocket = socket
     }
 
-    private fun loadRemoteCommands(query: String) {
+    private fun loadRemoteCommands() {
         val client = jmdApiClient ?: run {
             connectionStatus.text = "Pareie primeiro com o JMD desktop."
             return
@@ -539,13 +655,33 @@ class MainActivity : Activity() {
         connectionStatus.text = "Carregando comandos…"
         backgroundExecutor.execute {
             try {
-                val commands = client.getCommands(query)
+                val commands = client.getCommands()
                 runOnUiThread {
-                    commandContainer.removeAllViews()
-                    if (commands.isEmpty()) {
-                        commandContainer.addView(label("Nenhum comando disponível para essa busca.", textMuted, 13f))
-                    }
-                    commands.forEach { command ->
+                    allCommands = commands
+                    renderCommands(commandSearch.text.toString())
+                    connectionStatus.text = if (commands.isEmpty()) "Nenhum comando disponível no JMD." else "${commands.size} comando(s) carregado(s)."
+                }
+            } catch (error: Exception) {
+                runOnUiThread { connectionStatus.text = apiErrorMessage(error) }
+            }
+        }
+    }
+
+    private fun renderCommands(query: String) {
+        if (!::commandContainer.isInitialized) return
+        val normalized = query.trim().lowercase()
+        val commands = allCommands.filter { command ->
+            normalized.isBlank() || listOf(command.name, command.description, command.shortcut)
+                .any { it.lowercase().contains(normalized) }
+        }
+        commandContainer.removeAllViews()
+        if (commands.isEmpty()) {
+            commandContainer.addView(label(
+                if (allCommands.isEmpty()) "Os comandos aparecerão aqui quando o JMD estiver conectado." else "Nenhum comando encontrado para essa busca.",
+                textMuted, 13f
+            ))
+        }
+        commands.forEach { command ->
                         val item = LinearLayout(this).apply {
                             orientation = LinearLayout.VERTICAL
                             setPadding(dp(12), dp(11), dp(12), dp(11))
@@ -569,12 +705,9 @@ class MainActivity : Activity() {
                             }
                         }
                         commandContainer.addView(item, marginParams(top = 6))
-                    }
-                    connectionStatus.text = "${commands.size} comando(s) disponível(is). Toque em um para executar."
-                }
-            } catch (error: Exception) {
-                runOnUiThread { connectionStatus.text = apiErrorMessage(error) }
-            }
+        }
+        if (pairedJmd != null && allCommands.isNotEmpty()) {
+            connectionStatus.text = if (normalized.isBlank()) "${commands.size} comando(s) disponível(is)." else "${commands.size} resultado(s) para ‘$query’."
         }
     }
 
@@ -657,8 +790,12 @@ class MainActivity : Activity() {
                 if (error.code in setOf("unauthorized", "device_revoked")) {
                     credentialStore.clear()
                     pairedJmd = null
-                    if (::pairingButton.isInitialized) pairingButton.text = "Ler QR code do JMD"
-                    if (::reconnectButton.isInitialized) reconnectButton.visibility = View.GONE
+                    allCommands = emptyList()
+                    messageHandler.removeCallbacks(healthCheckRunnable)
+                    if (::pairingButton.isInitialized) pairingButton.visibility = View.VISIBLE
+                    if (::commandSearch.isInitialized) commandSearch.visibility = View.GONE
+                    if (::commandContainer.isInitialized) commandContainer.visibility = View.GONE
+                    refreshConnectionIndicator(false)
                 }
                 if (error.code == "command_unavailable") error.message ?: "Este comando não está disponível agora."
                 else "O acesso foi recusado. O JMD pode ter revogado este aparelho; faça o pareamento novamente."
