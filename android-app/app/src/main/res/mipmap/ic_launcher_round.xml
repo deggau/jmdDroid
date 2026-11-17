@@ -6,6 +6,5 @@
     <path android:fillColor="@color/jmd_surface" android:pathData="M0,0h48v48h-48z" />
     <path
         android:fillColor="@color/jmd_accent"
-        android:pathData="M16,10h16v5h-5v14c0,6.08 -3.92,10 -10,10h-3v-5h3c3.31,0 5,-1.69 5,-5v-14h-6z" />
-    <path android:fillColor="@color/jmd_accent" android:pathData="M29,8a3,3 0,1 0,6 0a3,3 0,1 0,-6 0" />
+        android:pathData="M16,10h16q1,0 1,1v3q0,1 -1,1h-2v14c0,6.08 -3.92,10 -10,10h-4v-5h4c3.31,0 5,-1.69 5,-5v-14h-4q-1,0 -1,-1v-3q0,-1 1,-1z" />
 </vector>
