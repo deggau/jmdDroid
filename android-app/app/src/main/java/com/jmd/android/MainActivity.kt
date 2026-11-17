@@ -18,12 +18,15 @@ import android.view.View
 import android.text.Editable
 import android.text.TextWatcher
 import android.widget.Button
+import android.widget.CheckBox
 import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
+import android.widget.ProgressBar
 import android.widget.PopupMenu
 import android.widget.ScrollView
+import android.widget.Spinner
 import android.widget.TextView
 import androidx.core.content.FileProvider
 import org.json.JSONObject
@@ -63,7 +66,20 @@ class MainActivity : Activity() {
     private lateinit var pairingButton: Button
     private lateinit var commandContainer: LinearLayout
     private lateinit var commandSearch: EditText
+    private lateinit var commandPanel: View
+    private lateinit var tasksPanel: LinearLayout
+    private lateinit var tasksContainer: LinearLayout
+    private lateinit var taskSearch: EditText
+    private lateinit var taskStatusText: TextView
+    private lateinit var commandsTab: Button
+    private lateinit var tasksTab: Button
     private var allCommands: List<RemoteCommand> = emptyList()
+    private var allTasks: List<JmdroidTask> = emptyList()
+    private var taskStatus = "open"
+    private var showingTaskHistory = false
+    private var taskHistoryPage = 0
+    private var taskHistoryItems: List<JmdroidTaskHistoryEntry> = emptyList()
+    private var taskHistoryTotal = 0
     private var pairedJmd: PairedJmd? = null
     private var jmdApiClient: JmdroidApiClient? = null
     private var jmdWebSocket: WebSocket? = null
@@ -76,6 +92,9 @@ class MainActivity : Activity() {
     private lateinit var appMessageText: TextView
     private val hideAppMessage = Runnable {
         if (::appMessageBanner.isInitialized) appMessageBanner.visibility = View.GONE
+    }
+    private val taskHistorySearchRunnable = Runnable {
+        if (showingTaskHistory && ::taskSearch.isInitialized) loadTaskHistory(0)
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -95,11 +114,11 @@ class MainActivity : Activity() {
         page.addView(buildHeader())
         page.addView(label("CONTROLE REMOTO", accent).apply {
             letterSpacing = 0.14f
-            setPadding(0, dp(34), 0, dp(8))
+            setPadding(0, dp(28), 0, dp(8))
         })
-        page.addView(label("Comandos", textPrimary, 30f, Typeface.create("sans-serif", Typeface.BOLD)))
+        page.addView(label("JMD no celular", textPrimary, 28f, Typeface.create("sans-serif", Typeface.BOLD)))
         page.addView(label(
-            "Consulte e execute no celular os comandos disponíveis no JMD desktop.",
+            "Acesse os comandos e acompanhe suas tarefas do desktop.",
             textMuted,
             15f
         ).apply {
@@ -107,7 +126,12 @@ class MainActivity : Activity() {
             setPadding(0, dp(8), 0, dp(22))
         })
 
-        page.addView(buildRemoteCard(), marginParams(top = 16))
+        page.addView(buildPrimaryTabs(), marginParams(top = 18))
+        commandPanel = buildRemoteCard()
+        page.addView(commandPanel, marginParams(top = 14))
+        tasksPanel = buildTasksScreen()
+        tasksPanel.visibility = View.GONE
+        page.addView(tasksPanel, marginParams(top = 14))
 
         page.addView(label("JMDROID  ·  ${BuildConfig.VERSION_NAME}", textMuted, 12f).apply {
             gravity = Gravity.CENTER
@@ -167,6 +191,7 @@ class MainActivity : Activity() {
     override fun onDestroy() {
         messageHandler.removeCallbacks(hideAppMessage)
         messageHandler.removeCallbacks(healthCheckRunnable)
+        messageHandler.removeCallbacks(taskHistorySearchRunnable)
         backgroundExecutor.shutdownNow()
         healthExecutor.shutdownNow()
         jmdWebSocket?.close(1000, "App fechado")
@@ -375,12 +400,13 @@ class MainActivity : Activity() {
             hint = "Filtrar comandos"
             setHintTextColor(textMuted)
             setTextColor(textPrimary)
-            textSize = 14f
+            textSize = 16f
             setSingleLine(true)
-            setPadding(dp(12), 0, dp(12), 0)
+            minHeight = dp(58)
+            setPadding(dp(16), dp(12), dp(16), dp(12))
             background = rounded(surface, border, 10f)
         }
-        addView(commandSearch, marginParams(top = 16))
+        addView(commandSearch, marginParams(top = 14))
         commandSearch.addTextChangedListener(object : TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
             override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = Unit
@@ -394,6 +420,310 @@ class MainActivity : Activity() {
         commandSearch.visibility = if (pairedJmd == null) View.GONE else View.VISIBLE
         commandContainer.visibility = if (pairedJmd == null) View.GONE else View.VISIBLE
         refreshConnectionStatus()
+    }
+
+    private fun buildPrimaryTabs(): View = LinearLayout(this).apply {
+        orientation = LinearLayout.HORIZONTAL
+        setPadding(dp(4), dp(4), dp(4), dp(4))
+        background = rounded(card, border, 14f)
+        commandsTab = Button(this@MainActivity).apply {
+            text = "Comandos"
+            textSize = 14f
+            isAllCaps = false
+            setOnClickListener { selectMainTab(showTasks = false) }
+        }
+        tasksTab = Button(this@MainActivity).apply {
+            text = "Tarefas"
+            textSize = 14f
+            isAllCaps = false
+            setOnClickListener { selectMainTab(showTasks = true) }
+        }
+        addView(commandsTab, LinearLayout.LayoutParams(0, dp(46), 1f))
+        addView(tasksTab, LinearLayout.LayoutParams(0, dp(46), 1f))
+        updateTabStyles(showTasks = false)
+    }
+
+    private fun selectMainTab(showTasks: Boolean) {
+        if (!::commandPanel.isInitialized || !::tasksPanel.isInitialized) return
+        commandPanel.visibility = if (showTasks) View.GONE else View.VISIBLE
+        tasksPanel.visibility = if (showTasks) View.VISIBLE else View.GONE
+        updateTabStyles(showTasks)
+        if (showTasks) {
+            if (pairedJmd == null) {
+                taskStatusText.text = "Conecte um JMD na tela Comandos para acessar as tarefas."
+                renderTasks()
+            } else if (showingTaskHistory) loadTaskHistory(0) else loadTasks()
+        }
+    }
+
+    private fun updateTabStyles(showTasks: Boolean) {
+        if (!::commandsTab.isInitialized) return
+        listOf(commandsTab to !showTasks, tasksTab to showTasks).forEach { (button, selected) ->
+            button.setTextColor(if (selected) ink else textMuted)
+            button.background = rounded(if (selected) accent else card, if (selected) accent else card, 10f)
+        }
+    }
+
+    private fun buildTasksScreen(): LinearLayout = LinearLayout(this).apply {
+        orientation = LinearLayout.VERTICAL
+        setPadding(dp(18), dp(18), dp(18), dp(18))
+        background = rounded(card, border, 16f)
+
+        val header = LinearLayout(this@MainActivity).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            addView(label("Tarefas", textPrimary, 20f, Typeface.create("sans-serif-medium", Typeface.NORMAL)),
+                LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+            addView(Button(this@MainActivity).apply {
+                text = "+ Nova tarefa"
+                textSize = 13f
+                isAllCaps = false
+                setTextColor(ink)
+                background = rounded(accent, accent, 10f)
+                setOnClickListener { showTaskEditor() }
+            })
+        }
+        addView(header)
+
+        val filters = LinearLayout(this@MainActivity).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, dp(12), 0, 0)
+        }
+        listOf("Abertas" to "open", "Concluídas" to "completed", "Todas" to "all").forEach { (title, status) ->
+            filters.addView(Button(this@MainActivity).apply {
+                text = title
+                textSize = 11f
+                isAllCaps = false
+                setTextColor(textMuted)
+                background = rounded(surface, surface, 9f)
+                setOnClickListener {
+                    showingTaskHistory = false
+                    taskStatus = status
+                    messageHandler.removeCallbacks(taskHistorySearchRunnable)
+                    taskSearch.hint = "Filtrar tarefas"
+                    taskSearch.setText("")
+                    taskStatusText.visibility = View.VISIBLE
+                    loadTasks()
+                }
+            }, LinearLayout.LayoutParams(0, dp(40), 1f).apply { marginEnd = dp(5) })
+        }
+        filters.addView(Button(this@MainActivity).apply {
+            text = "Histórico"
+            textSize = 11f
+            isAllCaps = false
+            setTextColor(accent)
+            background = rounded(surface, surface, 9f)
+            setOnClickListener {
+                showingTaskHistory = true
+                taskStatusText.visibility = View.VISIBLE
+                taskSearch.hint = "Buscar no histórico"
+                taskSearch.setText("")
+                loadTaskHistory(0)
+            }
+        }, LinearLayout.LayoutParams(0, dp(40), 0.9f))
+        addView(filters)
+
+        taskSearch = EditText(this@MainActivity).apply {
+            hint = "Filtrar tarefas"
+            setHintTextColor(textMuted)
+            setTextColor(textPrimary)
+            textSize = 16f
+            setSingleLine(true)
+            minHeight = dp(54)
+            setPadding(dp(14), dp(10), dp(14), dp(10))
+            background = rounded(surface, border, 10f)
+            addTextChangedListener(object : TextWatcher {
+                override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
+                override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = Unit
+                override fun afterTextChanged(s: Editable?) {
+                    if (showingTaskHistory) {
+                        messageHandler.removeCallbacks(taskHistorySearchRunnable)
+                        messageHandler.postDelayed(taskHistorySearchRunnable, 450)
+                    } else renderTasks()
+                }
+            })
+        }
+        addView(taskSearch, marginParams(top = 12))
+        taskStatusText = label("Conecte um JMD para carregar tarefas.", textMuted, 12f).apply {
+            setPadding(0, dp(10), 0, dp(2))
+        }
+        addView(taskStatusText)
+        tasksContainer = LinearLayout(this@MainActivity).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(0, dp(6), 0, 0)
+        }
+        addView(tasksContainer)
+        renderTasks()
+    }
+
+    private fun loadTasks() {
+        val client = jmdApiClient
+        if (client == null) {
+            taskStatusText.text = "Conecte um JMD na tela Comandos para acessar as tarefas."
+            renderTasks()
+            return
+        }
+        taskStatusText.text = "Carregando tarefas…"
+        backgroundExecutor.execute {
+            try {
+                val tasks = client.getTasks(taskStatus)
+                runOnUiThread {
+                    allTasks = tasks
+                    taskStatusText.text = "${tasks.size} tarefa(s)"
+                    renderTasks()
+                }
+            } catch (error: Exception) {
+                runOnUiThread { taskStatusText.text = apiErrorMessage(error); renderTasks() }
+            }
+        }
+    }
+
+    private fun renderTasks() {
+        if (!::tasksContainer.isInitialized) return
+        tasksContainer.removeAllViews()
+        if (showingTaskHistory) {
+            taskHistoryItems.forEach { item ->
+                val row = label("${item.commandName}\n${item.afterValue}\n${item.occurredAt} · ${item.sourceDeviceName ?: item.source}", textPrimary, 14f)
+                row.setPadding(dp(12), dp(12), dp(12), dp(12))
+                row.background = rounded(surface, border, 10f)
+                tasksContainer.addView(row, marginParams(top = 8))
+            }
+            if (taskHistoryItems.size < taskHistoryTotal) tasksContainer.addView(Button(this).apply {
+                text = "Carregar mais histórico"; isAllCaps = false
+                setOnClickListener { loadTaskHistory(taskHistoryPage + 1) }
+            })
+            return
+        }
+        val query = if (::taskSearch.isInitialized) taskSearch.text.toString().trim() else ""
+        val visible = allTasks.filter { query.isBlank() || it.title.contains(query, true) || it.description.contains(query, true) || it.checklist.any { s -> s.title.contains(query, true) } }
+        if (visible.isEmpty()) {
+            tasksContainer.addView(label(if (pairedJmd == null) "Conecte um JMD para ver as tarefas." else "Nenhuma tarefa encontrada.", textMuted, 14f).apply { setPadding(0, dp(16), 0, dp(16)) })
+        }
+        visible.forEach { task ->
+            val done = task.checklist.count { it.isCompleted }
+            val cardView = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL; setPadding(dp(14), dp(12), dp(14), dp(12)); background = rounded(surface, border, 12f)
+            }
+            val heading = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+            heading.addView(label("#${task.taskNumber}  ${task.title}", textPrimary, 16f, Typeface.create("sans-serif-medium", Typeface.NORMAL)), LinearLayout.LayoutParams(0, -2, 1f))
+            heading.addView(Button(this).apply { text = "⋮"; isAllCaps = false; setOnClickListener { showTaskActions(task) } })
+            cardView.addView(heading)
+            if (task.description.isNotBlank()) cardView.addView(label(task.description, textMuted, 13f).apply { setPadding(0, dp(4), 0, dp(4)) })
+            val percent = if (task.checklist.isEmpty()) if (task.completedAt != null) 100 else 0 else task.checklist.filter { it.isCompleted }.sumOf { it.weight }.toInt()
+            cardView.addView(label("${task.categoryColor} · $percent% · ${if (task.pausedAt != null) "Pausada" else if (task.completedAt != null) "Concluída" else "$done/${task.checklist.size} etapas"}", textMuted, 12f).apply { setPadding(0, dp(5), 0, dp(3)) })
+            if (task.checklist.isNotEmpty()) {
+                cardView.addView(ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply { max = 100; progress = percent }, LinearLayout.LayoutParams(-1, dp(5)))
+                task.checklist.forEachIndexed { index, step ->
+                    cardView.addView(CheckBox(this).apply {
+                        text = step.title; textSize = 13f; setTextColor(textPrimary); isChecked = step.isCompleted; isEnabled = task.completedAt == null
+                        setOnCheckedChangeListener { _, checked -> updateTaskStep(task.id, index, checked) }
+                    })
+                }
+            }
+            cardView.setOnClickListener { showTaskDetails(task) }
+            tasksContainer.addView(cardView, marginParams(top = 10))
+        }
+    }
+
+    private fun loadTaskHistory(page: Int) {
+        val client = jmdApiClient ?: return
+        taskStatusText.text = "Carregando histórico…"
+        backgroundExecutor.execute {
+            try {
+                val result = client.getTaskHistory(taskSearch.text.toString(), page)
+                runOnUiThread {
+                    taskHistoryPage = result.page; taskHistoryTotal = result.totalCount
+                    taskHistoryItems = if (page == 0) result.items else taskHistoryItems + result.items
+                    taskStatusText.text = "${result.totalCount} registro(s) no histórico"
+                    renderTasks()
+                }
+            } catch (error: Exception) { runOnUiThread { taskStatusText.text = apiErrorMessage(error) } }
+        }
+    }
+
+    private fun updateTaskStep(id: String, index: Int, checked: Boolean) {
+        val client = jmdApiClient ?: return
+        backgroundExecutor.execute {
+            try { client.setTaskChecklistStep(id, index, checked); runOnUiThread { loadTasks() } }
+            catch (error: Exception) { runOnUiThread { showBrandedMessage(apiErrorMessage(error)); loadTasks() } }
+        }
+    }
+
+    private fun showTaskDetails(task: JmdroidTask) {
+        val detail = buildString {
+            append(task.description.ifBlank { "Sem descrição" }); append("\n\nCategoria: ${task.categoryColor}")
+            task.reminderIntervalMinutes?.let { append("\nLembrete: a cada $it minutos") }
+            if (task.urls.isNotBlank()) append("\n\nLinks:\n${task.urls}")
+            if (task.attachments.isNotBlank()) append("\n\nAnexos:\n${task.attachments}")
+            task.pausedAt?.let { append("\n\nPausada: ${task.pauseReason} · ${task.pausedBy}") }
+        }
+        AlertDialog.Builder(this).setTitle("#${task.taskNumber} · ${task.title}").setMessage(detail)
+            .setPositiveButton("Editar") { _, _ -> showTaskEditor(task) }
+            .setNeutralButton(if (task.completedAt == null) "Concluir" else "Reabrir") { _, _ -> mutateTask { setTaskCompleted(task.id, task.completedAt == null) } }
+            .setNegativeButton("Fechar", null).show()
+    }
+
+    private fun showTaskActions(task: JmdroidTask) {
+        val options = mutableListOf("Ver detalhes", "Editar", if (task.pausedAt == null) "Pausar" else "Retomar", if (task.completedAt == null) "Concluir" else "Reabrir", "Excluir")
+        AlertDialog.Builder(this).setTitle(task.title).setItems(options.toTypedArray()) { _, which -> when (which) {
+            0 -> showTaskDetails(task); 1 -> showTaskEditor(task)
+            2 -> if (task.pausedAt == null) showPauseDialog(task) else mutateTask { unpauseTask(task.id) }
+            3 -> mutateTask { setTaskCompleted(task.id, task.completedAt == null) }
+            4 -> AlertDialog.Builder(this).setMessage("Excluir esta tarefa?").setNegativeButton("Cancelar", null).setPositiveButton("Excluir") { _, _ -> mutateTask { deleteTask(task.id); null } }.show()
+        } }.show()
+    }
+
+    private fun showPauseDialog(task: JmdroidTask) {
+        val reason = EditText(this).apply { hint = "Motivo da pausa" }
+        AlertDialog.Builder(this).setTitle("Pausar tarefa").setView(reason).setNegativeButton("Cancelar", null)
+            .setPositiveButton("Pausar") { _, _ -> mutateTask { pauseTask(task.id, reason.text.toString(), Build.MODEL ?: "Android") } }.show()
+    }
+
+    private fun mutateTask(action: JmdroidApiClient.() -> Any?) {
+        val client = jmdApiClient ?: return
+        backgroundExecutor.execute { try { client.action(); runOnUiThread { loadTasks(); showBrandedMessage("Tarefa atualizada") } }
+            catch (error: Exception) { runOnUiThread { showBrandedMessage(apiErrorMessage(error)) } } }
+    }
+
+    private fun showTaskEditor(task: JmdroidTask? = null) {
+        val form = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(20), dp(8), dp(20), dp(8)) }
+        fun field(hintText: String, value: String = "", multiline: Boolean = false) = EditText(this).apply {
+            hint = hintText; setText(value); setTextColor(textPrimary); textSize = 15f
+            if (multiline) minLines = 2 else setSingleLine(true)
+            form.addView(this, marginParams(top = 6))
+        }
+        val title = field("Título", task?.title.orEmpty())
+        val description = field("Descrição", task?.description.orEmpty(), true)
+        val checklist = field("Etapas (uma por linha)", task?.checklist?.joinToString("\n") { it.title }.orEmpty(), true)
+        val urls = field("Links (um por linha)", task?.urls.orEmpty(), true)
+        val attachments = field("Anexos (um por linha)", task?.attachments.orEmpty(), true)
+        val reminder = field("Lembrete em minutos (opcional)", task?.reminderIntervalMinutes?.toString().orEmpty())
+        val categories = arrayOf("Vermelho", "Laranja", "Amarelo", "Verde")
+        val spinner = Spinner(this).apply { adapter = android.widget.ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_dropdown_item, categories); setSelection(categories.indexOf(task?.categoryColor).coerceAtLeast(0)); form.addView(this) }
+        val scroll = ScrollView(this).apply { addView(form) }
+        AlertDialog.Builder(this).setTitle(if (task == null) "Nova tarefa" else "Editar tarefa").setView(scroll)
+            .setNegativeButton("Cancelar", null).setPositiveButton("Salvar", null).create().also { dialog ->
+                dialog.setOnShowListener {
+                    dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                        val name = title.text.toString().trim()
+                        val steps = checklist.text.toString().lines().map { it.trim() }.filter { it.isNotBlank() }
+                        val interval = reminder.text.toString().trim().toIntOrNull()
+                        if (name.isBlank() || name.length > 300 || (reminder.text.isNotBlank() && (interval == null || interval !in 1..10080))) {
+                            showBrandedMessage("Informe título e intervalo válidos."); return@setOnClickListener
+                        }
+                        val old = task?.checklist.orEmpty()
+                        val baseWeight = if (steps.isEmpty()) 0 else 100 / steps.size
+                        val entries = steps.mapIndexed { i, value ->
+                            val weight = if (i == steps.lastIndex) 100 - baseWeight * (steps.size - 1) else baseWeight
+                            JmdroidTaskChecklistEntry(value, weight.toDouble(), old.getOrNull(i)?.isCompleted ?: false)
+                        }
+                        val input = JmdroidTaskInput(name, description.text.toString(), interval, spinner.selectedItem.toString(), urls.text.toString(), attachments.text.toString(), entries)
+                        val client = jmdApiClient ?: return@setOnClickListener
+                        backgroundExecutor.execute { try { if (task == null) client.createTask(input) else client.updateTask(task.id, input); runOnUiThread { dialog.dismiss(); loadTasks(); showBrandedMessage("Tarefa salva") } } catch (error: Exception) { runOnUiThread { showBrandedMessage(apiErrorMessage(error)) } } }
+                    }
+                }
+            }.show()
     }
 
     private fun showPairingOptions() {
@@ -465,6 +795,8 @@ class MainActivity : Activity() {
         jmdSessionReady = false
         pairedJmd = null
         allCommands = emptyList()
+        allTasks = emptyList()
+        taskHistoryItems = emptyList()
         credentialStore.clear()
         pairingButton.visibility = View.VISIBLE
         commandSearch.visibility = View.GONE
@@ -483,6 +815,9 @@ class MainActivity : Activity() {
         if (::pairingButton.isInitialized) {
             pairingButton.text = if (pairedJmd == null) "Conectar ao JMD" else "Reconectar ao JMD"
             pairingButton.visibility = if (pairedJmd == null || !connected) View.VISIBLE else View.GONE
+        }
+        if (::connectionStatus.isInitialized && pairedJmd != null) {
+            connectionStatus.visibility = if (connected) View.GONE else View.VISIBLE
         }
         if (::connectionStatus.isInitialized && pairedJmd == null) connectionStatus.text = "Nenhum JMD conectado."
     }
