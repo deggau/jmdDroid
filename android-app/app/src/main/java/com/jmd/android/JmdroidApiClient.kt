@@ -5,6 +5,7 @@ import okhttp3.Request
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 import org.json.JSONObject
+import java.net.HttpURLConnection
 import java.net.URL
 import java.security.MessageDigest
 import java.security.cert.CertificateException
@@ -14,6 +15,23 @@ import javax.net.ssl.SSLContext
 import javax.net.ssl.TrustManager
 import javax.net.ssl.X509TrustManager
 import javax.net.ssl.HttpsURLConnection
+
+private fun validateLocalBaseUrl(baseUrl: String): java.net.URI {
+    val url = java.net.URI(baseUrl)
+    require((url.scheme.equals("http", ignoreCase = true) || url.scheme.equals("https", ignoreCase = true)) &&
+        url.host != null && url.port in 1..65535 && url.userInfo == null &&
+        url.rawPath.isNullOrEmpty() && url.rawQuery == null && url.rawFragment == null) {
+        "O endereço HTTP ou HTTPS do QR code é inválido."
+    }
+    val address = url.host.split('.').map { it.toIntOrNull() ?: -1 }
+    require(address.size == 4 && address.all { it in 0..255 } && url.host == address.joinToString(".") &&
+        address[0] in 1..223 &&
+        (address[0] == 10 || (address[0] == 172 && address[1] in 16..31) ||
+            (address[0] == 192 && address[1] == 168))) {
+        "O JMD precisa estar em um endereço IPv4 privado da rede local."
+    }
+    return url
+}
 
 internal data class PairingQr(
     val baseUrl: String,
@@ -33,15 +51,25 @@ internal data class RemoteCommand(
 )
 
 internal class JmdroidApiClient(private val paired: PairedJmd) {
-    private val trustManager = PinnedCertificateTrustManager(paired.certificateSha256)
-    private val sslContext = SSLContext.getInstance("TLS").apply { init(null, arrayOf<TrustManager>(trustManager), null) }
-    private val httpClient = OkHttpClient.Builder()
-        .sslSocketFactory(sslContext.socketFactory, trustManager)
-        .connectTimeout(10, TimeUnit.SECONDS)
-        .readTimeout(30, TimeUnit.SECONDS)
-        .followRedirects(false)
-        .followSslRedirects(false)
-        .build()
+    init {
+        validateLocalBaseUrl(paired.baseUrl)
+    }
+
+    private val trustManager = if (paired.baseUrl.startsWith("https://", ignoreCase = true)) {
+        PinnedCertificateTrustManager(paired.certificateSha256)
+    } else null
+    private val sslContext = trustManager?.let { manager ->
+        SSLContext.getInstance("TLS").apply { init(null, arrayOf<TrustManager>(manager), null) }
+    }
+    private val httpClient = OkHttpClient.Builder().apply {
+        if (trustManager != null && sslContext != null) {
+            sslSocketFactory(sslContext.socketFactory, trustManager)
+        }
+        connectTimeout(10, TimeUnit.SECONDS)
+        readTimeout(30, TimeUnit.SECONDS)
+        followRedirects(false)
+        followSslRedirects(false)
+    }.build()
 
     fun connectSession(listener: WebSocketListener): WebSocket {
         val request = Request.Builder()
@@ -78,8 +106,10 @@ internal class JmdroidApiClient(private val paired: PairedJmd) {
     }
 
     private fun request(method: String, path: String, body: JSONObject? = null): JSONObject {
-        val connection = (URL("${paired.baseUrl.trimEnd('/')}$path").openConnection() as HttpsURLConnection).apply {
-            sslSocketFactory = sslContext.socketFactory
+        val connection = (URL("${paired.baseUrl.trimEnd('/')}$path").openConnection() as HttpURLConnection).apply {
+            if (this is HttpsURLConnection) {
+                sslSocketFactory = requireNotNull(sslContext) { "A configuração HTTPS do JMD está incompleta." }.socketFactory
+            }
             connectTimeout = 10_000
             readTimeout = 30_000
             requestMethod = method
@@ -111,24 +141,22 @@ internal class JmdroidApiClient(private val paired: PairedJmd) {
             val qr = JSONObject(raw.trim())
             require(qr.optString("type") == "jmd-pairing" && qr.optInt("version") == 1) { "Este QR code não é um pareamento JMD compatível." }
             val baseUrl = qr.getString("baseUrl").trimEnd('/')
-            val url = java.net.URI(baseUrl)
-            require(url.scheme == "https" && url.host != null && url.port in 1..65535 && url.userInfo == null &&
-                url.rawPath.isNullOrEmpty() && url.rawQuery == null && url.rawFragment == null) {
-                "O endereço HTTPS do QR code é inválido."
+            val url = validateLocalBaseUrl(baseUrl)
+            val isHttps = url.scheme.equals("https", ignoreCase = true)
+            val fingerprint = if (isHttps) qr.optString("certificateSha256").replace(":", "").uppercase() else ""
+            if (isHttps) {
+                require(fingerprint.matches(Regex("[0-9A-F]{64}"))) { "A impressão digital do certificado no QR code é inválida." }
             }
-            val address = url.host.split('.').mapNotNull { it.toIntOrNull() }
-            require(address.size == 4 && address.all { it in 0..255 } && address[0] in 1..223 &&
-                (address[0] == 10 || (address[0] == 172 && address[1] in 16..31) || (address[0] == 192 && address[1] == 168))) {
-                "O JMD precisa estar em um endereço IPv4 privado da rede local."
-            }
-            val fingerprint = qr.getString("certificateSha256").replace(":", "").uppercase()
-            require(fingerprint.matches(Regex("[0-9A-F]{64}"))) { "A impressão digital do certificado no QR code é inválida." }
             return PairingQr(baseUrl, fingerprint, qr.getString("sessionId"), qr.getString("pairingSecret"))
         }
 
         fun pair(qr: PairingQr, deviceName: String, appVersion: String): PairedJmd {
-            val trustManager = PinnedCertificateTrustManager(qr.certificateSha256)
-            val sslContext = SSLContext.getInstance("TLS").apply { init(null, arrayOf<TrustManager>(trustManager), null) }
+            validateLocalBaseUrl(qr.baseUrl)
+            val isHttps = qr.baseUrl.startsWith("https://", ignoreCase = true)
+            val trustManager = if (isHttps) PinnedCertificateTrustManager(qr.certificateSha256) else null
+            val sslContext = trustManager?.let { manager ->
+                SSLContext.getInstance("TLS").apply { init(null, arrayOf<TrustManager>(manager), null) }
+            }
             val claim = JSONObject()
                 .put("sessionId", qr.sessionId)
                 .put("pairingSecret", qr.pairingSecret)
@@ -151,9 +179,11 @@ internal class JmdroidApiClient(private val paired: PairedJmd) {
             throw IllegalStateException("O pedido expirou sem aprovação. Gere outro QR code no JMD desktop.")
         }
 
-        private fun pairingRequest(qr: PairingQr, sslContext: SSLContext, method: String, path: String, body: JSONObject?): JSONObject {
-            val connection = (URL("${qr.baseUrl}$path").openConnection() as HttpsURLConnection).apply {
-                this.sslSocketFactory = sslContext.socketFactory
+        private fun pairingRequest(qr: PairingQr, sslContext: SSLContext?, method: String, path: String, body: JSONObject?): JSONObject {
+            val connection = (URL("${qr.baseUrl}$path").openConnection() as HttpURLConnection).apply {
+                if (this is HttpsURLConnection) {
+                    sslSocketFactory = requireNotNull(sslContext) { "A configuração HTTPS do JMD está incompleta." }.socketFactory
+                }
                 connectTimeout = 10_000
                 readTimeout = 10_000
                 requestMethod = method
