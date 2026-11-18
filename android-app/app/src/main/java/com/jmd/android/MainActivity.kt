@@ -86,6 +86,8 @@ class MainActivity : Activity() {
     private var jmdSessionReady = false
     private lateinit var updateStatus: TextView
     private lateinit var updateButton: Button
+    private lateinit var mainScreen: View
+    private var updateScreenVisible = false
     private var availableUpdate: GithubRelease? = null
     private var pendingApk: File? = null
     private lateinit var appMessageBanner: LinearLayout
@@ -181,7 +183,8 @@ class MainActivity : Activity() {
         ).apply {
             setMargins(dp(20), 0, dp(20), dp(48))
         })
-        setContentView(screen)
+        mainScreen = screen
+        setContentView(mainScreen)
         pairedJmd?.let {
             connectToJmd(it, loadCommands = true)
             scheduleHealthChecks()
@@ -197,6 +200,11 @@ class MainActivity : Activity() {
         jmdWebSocket?.close(1000, "App fechado")
         jmdApiClient?.close()
         super.onDestroy()
+    }
+
+    @Deprecated("Use the system back dispatcher")
+    override fun onBackPressed() {
+        if (updateScreenVisible) closeUpdateScreen() else super.onBackPressed()
     }
 
     private fun showBrandedMessage(message: String, durationMs: Long = 2_500L) {
@@ -326,41 +334,93 @@ class MainActivity : Activity() {
         addView(versionRow)
     }
 
-    private fun buildUpdateCard(): View = LinearLayout(this).apply {
-        orientation = LinearLayout.VERTICAL
-        setPadding(dp(18), dp(18), dp(18), dp(18))
-        background = rounded(card, border, 16f)
+    private fun buildUpdateScreen(): View {
+        val content = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(24), dp(24), dp(24), dp(28))
+            setBackgroundColor(surface)
+        }
+        val toolbar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            addView(TextView(this@MainActivity).apply {
+                text = "‹"
+                textSize = 34f
+                gravity = Gravity.CENTER
+                setTextColor(textPrimary)
+                contentDescription = "Voltar"
+                setOnClickListener { closeUpdateScreen() }
+            }, LinearLayout.LayoutParams(dp(48), dp(48)))
+            addView(label("Atualizações", textPrimary, 21f, Typeface.create("sans-serif-medium", Typeface.NORMAL)).apply {
+                setPadding(dp(8), 0, 0, 0)
+            })
+        }
+        content.addView(toolbar)
+        content.addView(label("JMDROID", accent, 11f, Typeface.create("sans-serif-medium", Typeface.NORMAL)).apply {
+            letterSpacing = 0.14f
+            setPadding(dp(2), dp(36), 0, dp(8))
+        })
+        content.addView(label("Atualização do aplicativo", textPrimary, 27f, Typeface.create("sans-serif", Typeface.BOLD)))
+        content.addView(label("Veja se há uma versão nova do JMDroid e instale quando estiver pronto.", textMuted, 15f).apply {
+            setLineSpacing(dp(3).toFloat(), 1f)
+            setPadding(0, dp(8), 0, dp(24))
+        })
 
-        addView(label("ATUALIZAÇÕES", accent, 11f, Typeface.create("sans-serif-medium", Typeface.NORMAL)).apply {
-            letterSpacing = 0.12f
-        })
-        addView(label("Versão do GitHub", textPrimary, 18f, Typeface.create("sans-serif-medium", Typeface.NORMAL)).apply {
-            setPadding(0, dp(6), 0, dp(3))
-        })
-        addView(label("O JMDroid verifica a release mais recente e baixa a atualização quando você solicitar.", textMuted, 13f).apply {
+        val versionCard = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(18), dp(18), dp(18), dp(18))
+            background = rounded(card, border, 16f)
+            addView(label("VERSÃO INSTALADA", textMuted, 11f, Typeface.create("sans-serif-medium", Typeface.NORMAL)).apply {
+                letterSpacing = 0.1f
+            })
+            addView(label("${BuildConfig.VERSION_NAME} · build ${BuildConfig.VERSION_CODE}", textPrimary, 20f, Typeface.create("sans-serif-medium", Typeface.NORMAL)).apply {
+                setPadding(0, dp(6), 0, 0)
+            })
+        }
+        content.addView(versionCard)
+
+        updateStatus = label("Toque no botão para consultar a versão mais recente.", textMuted, 14f).apply {
             setLineSpacing(dp(2).toFloat(), 1f)
-            setPadding(0, 0, 0, dp(12))
-        })
-
-        updateButton = Button(this@MainActivity).apply {
+            setPadding(dp(16), dp(16), dp(16), dp(16))
+            background = rounded(card, border, 14f)
+        }
+        content.addView(updateStatus, marginParams(top = 12))
+        updateButton = Button(this).apply {
             text = "Verificar atualizações"
-            textSize = 14f
+            textSize = 15f
             typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
             isAllCaps = false
             setTextColor(ink)
             background = rounded(accent, accent, 12f)
-            minHeight = dp(48)
+            minHeight = dp(52)
             setOnClickListener {
-                val update = availableUpdate
-                if (update != null) showUpdateDialog(update) else checkForUpdate(showCurrent = true)
+                val release = availableUpdate
+                if (release != null) downloadAndInstall(release) else checkForUpdate()
             }
         }
-        addView(updateButton, marginParams())
-
-        updateStatus = label("Toque para consultar a versão mais recente no GitHub.", textMuted, 12f).apply {
-            setPadding(0, dp(10), 0, 0)
+        content.addView(updateButton, marginParams(top = 16))
+        content.addView(label("O download é conferido por SHA-256. O Android pedirá confirmação antes da instalação.", textMuted, 12f).apply {
+            setLineSpacing(dp(2).toFloat(), 1f)
+            setPadding(dp(2), dp(12), dp(2), 0)
+        })
+        return ScrollView(this).apply {
+            isFillViewport = true
+            setBackgroundColor(surface)
+            addView(content)
         }
-        addView(updateStatus)
+    }
+
+    private fun openUpdateScreen() {
+        messageHandler.removeCallbacks(hideAppMessage)
+        if (::appMessageBanner.isInitialized) appMessageBanner.visibility = View.GONE
+        updateScreenVisible = true
+        setContentView(buildUpdateScreen())
+        checkForUpdate()
+    }
+
+    private fun closeUpdateScreen() {
+        updateScreenVisible = false
+        setContentView(mainScreen)
     }
 
     private fun buildRemoteCard(): View = LinearLayout(this).apply {
@@ -607,7 +667,6 @@ class MainActivity : Activity() {
             }
             val heading = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
             heading.addView(label("#${task.taskNumber}  ${task.title}", textPrimary, 16f, Typeface.create("sans-serif-medium", Typeface.NORMAL)), LinearLayout.LayoutParams(0, -2, 1f))
-            heading.addView(Button(this).apply { text = "⋮"; isAllCaps = false; setOnClickListener { showTaskActions(task) } })
             cardView.addView(heading)
             if (task.description.isNotBlank()) cardView.addView(label(task.description, textMuted, 13f).apply { setPadding(0, dp(4), 0, dp(4)) })
             val percent = if (task.checklist.isEmpty()) if (task.completedAt != null) 100 else 0 else task.checklist.filter { it.isCompleted }.sumOf { it.weight }.toInt()
@@ -621,6 +680,25 @@ class MainActivity : Activity() {
                     })
                 }
             }
+            val actions = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.END or Gravity.CENTER_VERTICAL
+                setPadding(0, dp(8), 0, 0)
+            }
+            actions.addView(taskActionIcon(if (task.completedAt == null) "✓" else "↻", if (task.completedAt == null) "Concluir tarefa" else "Reabrir tarefa", Color.rgb(46, 125, 50)) {
+                mutateTask { setTaskCompleted(task.id, task.completedAt == null) }
+            })
+            actions.addView(taskActionIcon("✎", "Editar tarefa", accent) { showTaskEditor(task) })
+            actions.addView(taskActionIcon(if (task.pausedAt == null) "Ⅱ" else "▶", if (task.pausedAt == null) "Pausar tarefa" else "Retomar tarefa", Color.rgb(230, 126, 34)) {
+                if (task.pausedAt == null) showPauseDialog(task) else mutateTask { unpauseTask(task.id) }
+            })
+            actions.addView(taskActionIcon("×", "Excluir tarefa", Color.rgb(198, 40, 40)) {
+                AlertDialog.Builder(this@MainActivity).setMessage("Excluir esta tarefa?")
+                    .setNegativeButton("Cancelar", null)
+                    .setPositiveButton("Excluir") { _, _ -> mutateTask { deleteTask(task.id); null } }
+                    .show()
+            })
+            cardView.addView(actions)
             cardView.setOnClickListener { showTaskDetails(task) }
             tasksContainer.addView(cardView, marginParams(top = 10))
         }
@@ -664,14 +742,18 @@ class MainActivity : Activity() {
             .setNegativeButton("Fechar", null).show()
     }
 
-    private fun showTaskActions(task: JmdroidTask) {
-        val options = mutableListOf("Ver detalhes", "Editar", if (task.pausedAt == null) "Pausar" else "Retomar", if (task.completedAt == null) "Concluir" else "Reabrir", "Excluir")
-        AlertDialog.Builder(this).setTitle(task.title).setItems(options.toTypedArray()) { _, which -> when (which) {
-            0 -> showTaskDetails(task); 1 -> showTaskEditor(task)
-            2 -> if (task.pausedAt == null) showPauseDialog(task) else mutateTask { unpauseTask(task.id) }
-            3 -> mutateTask { setTaskCompleted(task.id, task.completedAt == null) }
-            4 -> AlertDialog.Builder(this).setMessage("Excluir esta tarefa?").setNegativeButton("Cancelar", null).setPositiveButton("Excluir") { _, _ -> mutateTask { deleteTask(task.id); null } }.show()
-        } }.show()
+    private fun taskActionIcon(symbol: String, description: String, tint: Int, action: () -> Unit): TextView = TextView(this).apply {
+        text = symbol
+        contentDescription = description
+        textSize = 21f
+        gravity = Gravity.CENTER
+        setTextColor(tint)
+        background = rounded(card, border, 10f)
+        isFocusable = true
+        isClickable = true
+        setOnClickListener { action() }
+        setPadding(0, 0, 0, 0)
+        layoutParams = LinearLayout.LayoutParams(dp(42), dp(42)).apply { marginStart = dp(8) }
     }
 
     private fun showPauseDialog(task: JmdroidTask) {
@@ -755,12 +837,7 @@ class MainActivity : Activity() {
                 true
             }
             menu.add("Verificar atualizações").setOnMenuItemClickListener {
-                AlertDialog.Builder(this@MainActivity)
-                    .setTitle("Atualizações")
-                    .setView(buildUpdateCard())
-                    .setNegativeButton("Fechar", null)
-                    .show()
-                availableUpdate?.let(::showUpdateDialog)
+                openUpdateScreen()
                 true
             }
             if (pairedJmd == null) {
@@ -1141,7 +1218,7 @@ class MainActivity : Activity() {
         else -> error.message ?: "Não foi possível acessar o JMD. Confira se o computador está na mesma rede e com a tela de pareamento aberta."
     }
 
-    private fun checkForUpdate(showCurrent: Boolean) {
+    private fun checkForUpdate() {
         updateButton.isEnabled = false
         updateStatus.text = "Consultando a release no GitHub…"
         backgroundExecutor.execute {
@@ -1152,21 +1229,18 @@ class MainActivity : Activity() {
                     updateButton.isEnabled = true
                     if (isNewer) {
                         availableUpdate = release
-                        updateButton.text = "Baixar ${release.tag}"
-                        updateStatus.text = "Nova versão disponível: ${release.tag}"
-                        showUpdateDialog(release)
+                        updateButton.text = "Baixar e instalar ${release.tag}"
+                        updateStatus.text = "A versão ${release.tag} está disponível. Toque abaixo para baixar e iniciar a instalação."
                     } else {
                         availableUpdate = null
-                        updateButton.text = "Verificar atualizações"
+                        updateButton.text = "Verificar novamente"
                         updateStatus.text = "Você está na versão mais recente (${BuildConfig.VERSION_NAME})."
-                        if (showCurrent) showBrandedMessage("JMDroid já está atualizado")
                     }
                 }
             } catch (_: Exception) {
                 runOnUiThread {
                     updateButton.isEnabled = true
                     updateStatus.text = "Não foi possível consultar o GitHub. Verifique sua conexão."
-                    if (showCurrent) showBrandedMessage("Falha ao verificar atualizações")
                 }
             }
         }
@@ -1204,15 +1278,6 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun showUpdateDialog(release: GithubRelease) {
-        AlertDialog.Builder(this)
-            .setTitle("JMDroid ${release.tag} disponível")
-            .setMessage("Baixar a atualização? O Android exibirá a confirmação para instalar.")
-            .setNegativeButton("Depois", null)
-            .setPositiveButton("Baixar e instalar") { _, _ -> downloadAndInstall(release) }
-            .show()
-    }
-
     private fun downloadAndInstall(release: GithubRelease) {
         updateButton.isEnabled = false
         updateStatus.text = "Baixando ${release.tag}…"
@@ -1228,7 +1293,6 @@ class MainActivity : Activity() {
                 runOnUiThread {
                     updateButton.isEnabled = true
                     updateStatus.text = "Não foi possível baixar a atualização. Tente novamente."
-                    showBrandedMessage("Falha ao baixar a atualização")
                 }
             }
         }

@@ -5,6 +5,10 @@
     android:viewportHeight="48">
     <path android:fillColor="@color/jmd_surface" android:pathData="M0,0h48v48h-48z" />
     <path
-        android:fillColor="@color/jmd_accent"
-        android:pathData="M16,10h16q1,0 1,1v3q0,1 -1,1h-2v14c0,6.08 -3.92,10 -10,10h-4v-5h4c3.31,0 5,-1.69 5,-5v-14h-4q-1,0 -1,-1v-3q0,-1 1,-1z" />
+        android:fillColor="@android:color/transparent"
+        android:pathData="M15,13 L33,13 L33,29 C33,37 28,42 20,42 C15,42 11,39 9,34"
+        android:strokeColor="@color/jmd_accent"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:strokeWidth="5" />
 </vector>
