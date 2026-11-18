@@ -304,9 +304,9 @@ internal class JmdroidApiClient(private val paired: PairedJmd) {
     }
 
     fun execute(commandId: String, input: JSONObject): JSONObject {
-        require(commandId.matches(Regex("[A-Za-z0-9_-]{1,80}"))) { "ID de comando inválido." }
+        require(RemoteCommandIdPolicy.isValid(commandId)) { "ID de comando inválido." }
         val body = JSONObject().put("requestId", java.util.UUID.randomUUID().toString()).put("input", input)
-        return request("POST", "/api/v1/commands/$commandId/execute", body)
+        return request("POST", RemoteCommandIdPolicy.executePath(commandId), body)
     }
 
     fun close() {
