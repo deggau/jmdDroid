@@ -47,7 +47,9 @@ internal data class RemoteCommand(
     val description: String,
     val shortcut: String,
     val available: Boolean,
-    val unavailableReason: String?
+    val unavailableReason: String?,
+    val isWorkflow: Boolean = false,
+    val inputVariables: List<String> = emptyList()
 )
 
 internal data class JmdroidTaskChecklistEntry(
@@ -136,14 +138,23 @@ internal class JmdroidApiClient(private val paired: PairedJmd) {
     }
 
     fun getCommands(query: String = ""): List<RemoteCommand> {
-        val suffix = if (query.isBlank()) "" else "?q=${java.net.URLEncoder.encode(query, "UTF-8")}"
+        val params = mutableListOf("includeUnavailable=true")
+        if (query.isNotBlank()) params += "q=${java.net.URLEncoder.encode(query, "UTF-8")}"
+        val suffix = "?${params.joinToString("&")}"
         val response = request("GET", "/api/v1/commands$suffix")
         val items = response.getJSONArray("items")
         return (0 until items.length()).map { index ->
             val item = items.getJSONObject(index)
+            val schema = item.optJSONObject("inputSchema")
+            val variableProperties = schema?.optJSONObject("properties")?.optJSONObject("variables")
+                ?.optJSONObject("properties")
+            val variables = variableProperties?.keys()?.asSequence()?.toList().orEmpty()
+            val workflow = variableProperties != null || item.optString("unavailableReason")
+                .contains("execução remota", ignoreCase = true)
             RemoteCommand(
                 item.getString("id"), item.getString("name"), item.optString("description"),
-                item.optString("shortcut"), item.optBoolean("available"), item.optString("unavailableReason").takeIf { it.isNotBlank() }
+                item.optString("shortcut"), item.optBoolean("available"), item.optString("unavailableReason").takeIf { it.isNotBlank() },
+                workflow, variables
             )
         }
     }
@@ -208,9 +219,8 @@ internal class JmdroidApiClient(private val paired: PairedJmd) {
         return JmdroidTaskHistoryPage(items, response.optInt("totalCount"), response.optInt("page"), response.optInt("pageSize"))
     }
 
-    fun execute(commandId: String, text: String): JSONObject {
+    fun execute(commandId: String, input: JSONObject): JSONObject {
         require(commandId.matches(Regex("[A-Za-z0-9_-]{1,80}"))) { "ID de comando inválido." }
-        val input = JSONObject().put("text", text)
         val body = JSONObject().put("requestId", java.util.UUID.randomUUID().toString()).put("input", input)
         return request("POST", "/api/v1/commands/$commandId/execute", body)
     }

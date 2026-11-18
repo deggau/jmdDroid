@@ -227,10 +227,12 @@ class MainActivity : Activity() {
                     AlertDialog.Builder(this)
                         .setTitle("QR code inválido")
                         .setMessage(error.message ?: "O código lido não é um pareamento JMD válido.")
-                        .setPositiveButton("Tentar novamente") { _, _ -> showPairingOptions() }
+                        .setPositiveButton("Tentar novamente") { _, _ -> startPairingScanner() }
                         .setNegativeButton("Fechar", null)
                         .show()
                 }
+            } else if (data?.getBooleanExtra(QR_SCAN_MANUAL, false) == true) {
+                showManualPairingInput()
             }
             return
         }
@@ -450,7 +452,7 @@ class MainActivity : Activity() {
             minHeight = dp(48)
             setOnClickListener {
                 val paired = pairedJmd
-                if (paired == null) showPairingOptions() else connectToJmd(paired, loadCommands = true)
+                if (paired == null) startPairingScanner() else connectToJmd(paired, loadCommands = true)
             }
         }
         addView(pairingButton, marginParams(top = 10))
@@ -808,18 +810,8 @@ class MainActivity : Activity() {
             }.show()
     }
 
-    private fun showPairingOptions() {
-        AlertDialog.Builder(this)
-            .setTitle("Parear com o JMD")
-            .setItems(arrayOf("Ler QR code com a câmera", "Colar o conteúdo do QR")) { _, choice ->
-                if (choice == 0) {
-                    startActivityForResult(Intent(this, QrScannerActivity::class.java), QR_SCAN_REQUEST)
-                } else {
-                    showManualPairingInput()
-                }
-            }
-            .setNegativeButton("Cancelar", null)
-            .show()
+    private fun startPairingScanner() {
+        startActivityForResult(Intent(this, QrScannerActivity::class.java), QR_SCAN_REQUEST)
     }
 
     private fun showSecondaryMenu(anchor: View) {
@@ -842,7 +834,7 @@ class MainActivity : Activity() {
             }
             if (pairedJmd == null) {
                 menu.add("Conectar a um JMD").setOnMenuItemClickListener {
-                    showPairingOptions()
+                    startPairingScanner()
                     true
                 }
             } else {
@@ -851,7 +843,7 @@ class MainActivity : Activity() {
                     true
                 }
                 menu.add("Conectar a outro JMD").setOnMenuItemClickListener {
-                    showPairingOptions()
+                    startPairingScanner()
                     true
                 }
                 menu.add("Desconectar").setOnMenuItemClickListener {
@@ -1105,16 +1097,17 @@ class MainActivity : Activity() {
                             if (command.shortcut.isNotBlank()) {
                                 addView(label(command.shortcut, accent, 11f).apply { setPadding(0, dp(4), 0, 0) })
                             }
+                            if (!command.available) {
+                                addView(label(
+                                    command.unavailableReason ?: "A execução será solicitada ao JMD desktop.",
+                                    textMuted,
+                                    11f
+                                ).apply { setPadding(0, dp(5), 0, 0) })
+                            }
                             isClickable = command.available
                             isEnabled = command.available
                             alpha = if (command.available) 1f else 0.55f
-                            setOnClickListener { showCommandInput(command) }
-                            if (!command.available && !command.unavailableReason.isNullOrBlank()) {
-                                setOnLongClickListener {
-                                    showBrandedMessage(command.unavailableReason, 3_500L)
-                                    true
-                                }
-                            }
+                            if (command.available) setOnClickListener { showCommandInput(command) }
                         }
                         commandContainer.addView(item, marginParams(top = 6))
         }
@@ -1124,7 +1117,12 @@ class MainActivity : Activity() {
     }
 
     private fun showCommandInput(command: RemoteCommand) {
-        val input = EditText(this).apply {
+        val form = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(20), dp(8), dp(20), dp(8))
+        }
+        val workflowFields = linkedMapOf<String, EditText>()
+        val textInput = if (!command.isWorkflow) EditText(this).apply {
             hint = "Texto para enviar ao computador"
             setTextColor(textPrimary)
             setHintTextColor(textMuted)
@@ -1132,38 +1130,73 @@ class MainActivity : Activity() {
             maxLines = 10
             gravity = Gravity.TOP
             inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_FLAG_MULTI_LINE
+            form.addView(this)
+        } else null
+        if (command.isWorkflow) {
+            form.addView(label("O workflow será executado no JMD desktop.", textMuted, 13f).apply {
+                setPadding(0, 0, 0, dp(8))
+            })
+            command.inputVariables.forEach { variable ->
+                form.addView(label(variable, textPrimary, 13f, Typeface.create("sans-serif-medium", Typeface.NORMAL)).apply {
+                    setPadding(0, dp(8), 0, dp(4))
+                })
+                workflowFields[variable] = EditText(this).apply {
+                    hint = "Valor para $variable"
+                    setTextColor(textPrimary)
+                    setHintTextColor(textMuted)
+                    setSingleLine(true)
+                    form.addView(this)
+                }
+            }
+            if (command.inputVariables.isEmpty()) {
+                form.addView(label("Este workflow não solicita valores adicionais.", textMuted, 13f))
+            }
         }
         AlertDialog.Builder(this)
             .setTitle(command.name)
-            .setMessage("O texto será enviado ao JMD no computador para executar este comando.")
-            .setView(input)
+            .setMessage(if (command.isWorkflow) "Os dados serão enviados à API para execução no desktop." else "O texto será enviado à API para execução no desktop.")
+            .setView(form)
             .setNegativeButton("Cancelar", null)
             .setPositiveButton("Executar", null)
             .create().also { dialog ->
                 dialog.setOnShowListener {
                     dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
-                        if (input.text.isEmpty()) {
-                            input.error = "Informe o texto para processar."
-                            return@setOnClickListener
-                        }
-                        if (input.text.length > 1_000_000) {
-                            input.error = "O limite é 1.000.000 de caracteres."
-                            return@setOnClickListener
+                        val payload = if (command.isWorkflow) {
+                            val variables = JSONObject()
+                            workflowFields.forEach { (name, field) ->
+                                if (field.text.length > 10_000) {
+                                    field.error = "O limite é 10.000 caracteres."
+                                    return@setOnClickListener
+                                }
+                                if (field.text.isNotEmpty()) variables.put(name, field.text.toString())
+                            }
+                            JSONObject().put("variables", variables)
+                        } else {
+                            val text = textInput?.text?.toString().orEmpty()
+                            if (text.isEmpty()) {
+                                textInput?.error = "Informe o texto para processar."
+                                return@setOnClickListener
+                            }
+                            if (text.length > 1_000_000) {
+                                textInput?.error = "O limite é 1.000.000 de caracteres."
+                                return@setOnClickListener
+                            }
+                            JSONObject().put("text", text)
                         }
                         dialog.dismiss()
-                        executeRemoteCommand(command, input.text.toString())
+                        executeRemoteCommand(command, payload)
                     }
                 }
                 dialog.show()
             }
     }
 
-    private fun executeRemoteCommand(command: RemoteCommand, text: String) {
+    private fun executeRemoteCommand(command: RemoteCommand, input: JSONObject) {
         val client = jmdApiClient ?: return
         connectionStatus.text = "Executando ${command.name}…"
         backgroundExecutor.execute {
             try {
-                val response = client.execute(command.id, text)
+                val response = client.execute(command.id, input)
                 val succeeded = response.optString("status") == "succeeded"
                 val output = response.optJSONObject("result")?.optString("text").orEmpty()
                 val error = response.optJSONObject("error")?.optString("message").orEmpty()
@@ -1174,7 +1207,11 @@ class MainActivity : Activity() {
                         .setMessage(error.ifBlank { "O JMD não conseguiu executar o comando." }).setPositiveButton("OK", null).show()
                 }
             } catch (error: Exception) {
-                runOnUiThread { connectionStatus.text = apiErrorMessage(error) }
+                runOnUiThread {
+                    val message = apiErrorMessage(error)
+                    connectionStatus.text = message
+                    showBrandedMessage(message, 4_000L)
+                }
             }
         }
     }

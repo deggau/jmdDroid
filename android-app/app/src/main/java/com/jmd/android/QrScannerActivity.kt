@@ -33,6 +33,7 @@ import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 
 internal const val QR_SCAN_RESULT = "com.jmd.android.QR_SCAN_RESULT"
+internal const val QR_SCAN_MANUAL = "com.jmd.android.QR_SCAN_MANUAL"
 
 class QrScannerActivity : ComponentActivity() {
     private val ink by lazy { getColor(R.color.jmd_ink) }
@@ -156,6 +157,16 @@ class QrScannerActivity : ComponentActivity() {
             setOnClickListener { toggleTorch() }
         }
         addView(flashButton, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(48)))
+
+        addView(Button(this@QrScannerActivity).apply {
+            text = "Digitar ou colar QR manualmente"
+            textSize = 14f
+            isAllCaps = false
+            setTextColor(getColor(R.color.jmd_text))
+            background = null
+            minHeight = dp(48)
+            setOnClickListener { openManualInput() }
+        }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(50)))
     }
 
     private fun ensureCameraPermission() {
@@ -167,7 +178,7 @@ class QrScannerActivity : ComponentActivity() {
             AlertDialog.Builder(this)
                 .setTitle("Permitir uso da câmera")
                 .setMessage("A câmera será usada somente para ler o QR code de pareamento exibido pelo JMD.")
-                .setNegativeButton("Agora não") { _, _ -> finish() }
+                .setNegativeButton("Digitar manualmente") { _, _ -> openManualInput() }
                 .setPositiveButton("Continuar") { _, _ -> requestPermissions(arrayOf(Manifest.permission.CAMERA), CAMERA_PERMISSION_REQUEST) }
                 .show()
         } else {
@@ -182,12 +193,14 @@ class QrScannerActivity : ComponentActivity() {
         if (grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED) {
             startCamera()
         } else {
-            AlertDialog.Builder(this)
-                .setTitle("Câmera não autorizada")
-                .setMessage("Para ler o QR code, permita que o JMDroid use a câmera.")
-                .setPositiveButton("OK") { _, _ -> finish() }
-                .show()
+            statusView.text = "Câmera não autorizada. Você ainda pode digitar ou colar o QR manualmente."
+            flashButton.isEnabled = false
         }
+    }
+
+    private fun openManualInput() {
+        setResult(RESULT_CANCELED, Intent().putExtra(QR_SCAN_MANUAL, true))
+        finish()
     }
 
     private fun startCamera() {
