@@ -12,6 +12,7 @@ import android.graphics.drawable.GradientDrawable
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.provider.OpenableColumns
 import android.provider.Settings
 import android.view.Gravity
 import android.view.View
@@ -26,7 +27,6 @@ import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.PopupMenu
 import android.widget.ScrollView
-import android.widget.Spinner
 import android.widget.TextView
 import androidx.core.content.FileProvider
 import org.json.JSONObject
@@ -80,6 +80,7 @@ class MainActivity : Activity() {
     private var taskHistoryPage = 0
     private var taskHistoryItems: List<JmdroidTaskHistoryEntry> = emptyList()
     private var taskHistoryTotal = 0
+    private var taskAttachmentPickerCallback: ((List<JmdroidAttachmentUpload>) -> Unit)? = null
     private var pairedJmd: PairedJmd? = null
     private var jmdApiClient: JmdroidApiClient? = null
     private var jmdWebSocket: WebSocket? = null
@@ -218,6 +219,24 @@ class MainActivity : Activity() {
     @Deprecated("Use the activity result API")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == TASK_ATTACHMENT_PICKER_REQUEST) {
+            val callback = taskAttachmentPickerCallback
+            taskAttachmentPickerCallback = null
+            if (resultCode == RESULT_OK && callback != null) {
+                try {
+                    val uris = buildList {
+                        data?.clipData?.let { clip ->
+                            for (index in 0 until clip.itemCount) clip.getItemAt(index).uri?.let(::add)
+                        }
+                        if (isEmpty()) data?.data?.let(::add)
+                    }.distinct()
+                    callback(uris.map(::describeTaskAttachment))
+                } catch (error: Exception) {
+                    showBrandedMessage(error.message ?: "Não foi possível ler os arquivos selecionados.", 4_000L)
+                }
+            }
+            return
+        }
         if (requestCode == QR_SCAN_REQUEST) {
             if (resultCode == RESULT_OK) {
                 val rawQr = data?.getStringExtra(QR_SCAN_RESULT).orEmpty()
@@ -781,10 +800,126 @@ class MainActivity : Activity() {
         val description = field("Descrição", task?.description.orEmpty(), true)
         val checklist = field("Etapas (uma por linha)", task?.checklist?.joinToString("\n") { it.title }.orEmpty(), true)
         val urls = field("Links (um por linha)", task?.urls.orEmpty(), true)
-        val attachments = field("Anexos (um por linha)", task?.attachments.orEmpty(), true)
+        val selectedAttachments = mutableListOf<JmdroidAttachmentUpload>()
+        form.addView(label("Anexos", textMuted, 12f).apply { setPadding(0, dp(10), 0, dp(2)) })
+        val existingAttachments = task?.attachments.orEmpty().lines().map { it.trim() }.filter { it.isNotBlank() }
+        if (existingAttachments.isNotEmpty()) {
+            val existingNames = existingAttachments.joinToString("\n") { it.substringAfterLast('\\').substringAfterLast('/') }
+            form.addView(label("Já enviados:\n$existingNames", textMuted, 12f).apply {
+                setLineSpacing(dp(2).toFloat(), 1f)
+                setPadding(0, dp(4), 0, dp(6))
+            })
+        }
+        val selectedAttachmentList = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        fun renderSelectedAttachments() {
+            selectedAttachmentList.removeAllViews()
+            if (selectedAttachments.isEmpty()) {
+                selectedAttachmentList.addView(label("Nenhum arquivo novo selecionado.", textMuted, 12f))
+                return
+            }
+            selectedAttachments.forEach { attachment ->
+                val row = LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    addView(label(attachment.fileName, textPrimary, 13f), LinearLayout.LayoutParams(0, -2, 1f))
+                    addView(TextView(this@MainActivity).apply {
+                        text = "×"
+                        textSize = 22f
+                        gravity = Gravity.CENTER
+                        contentDescription = "Remover ${attachment.fileName}"
+                        setTextColor(textMuted)
+                        setOnClickListener {
+                            selectedAttachments.removeAll { it.uri == attachment.uri }
+                            renderSelectedAttachments()
+                        }
+                    }, LinearLayout.LayoutParams(dp(38), dp(38)))
+                }
+                selectedAttachmentList.addView(row)
+            }
+        }
+        val chooseAttachmentsButton = Button(this).apply {
+            text = "Selecionar arquivos do celular"
+            textSize = 13f
+            isAllCaps = false
+            setTextColor(accent)
+            background = rounded(surface, border, 10f)
+            minHeight = dp(44)
+            setOnClickListener {
+                taskAttachmentPickerCallback = { picked ->
+                    picked.forEach { attachment ->
+                        if (selectedAttachments.any { it.uri == attachment.uri }) return@forEach
+                        if (selectedAttachments.size >= MAX_TASK_ATTACHMENT_FILES) {
+                            showBrandedMessage("A API aceita até 10 arquivos por envio.")
+                            return@forEach
+                        }
+                        if (attachment.sizeBytes != null && attachment.sizeBytes > MAX_TASK_ATTACHMENT_BYTES) {
+                            showBrandedMessage("${attachment.fileName} excede o limite de 20 MiB.", 4_000L)
+                            return@forEach
+                        }
+                        val totalKnownBytes = selectedAttachments.mapNotNull { it.sizeBytes }.sum() + (attachment.sizeBytes ?: 0L)
+                        if (totalKnownBytes > MAX_TASK_ATTACHMENT_TOTAL_BYTES) {
+                            showBrandedMessage("O total dos anexos deve ser de até 24 MiB.", 4_000L)
+                            return@forEach
+                        }
+                        selectedAttachments += attachment
+                    }
+                    renderSelectedAttachments()
+                }
+                val picker = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+                    addCategory(Intent.CATEGORY_OPENABLE)
+                    type = "*/*"
+                    putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
+                }
+                startActivityForResult(picker, TASK_ATTACHMENT_PICKER_REQUEST)
+            }
+        }
+        form.addView(chooseAttachmentsButton, marginParams(top = 4))
+        form.addView(selectedAttachmentList, marginParams(top = 4))
+        form.addView(label("Até 10 arquivos, 20 MiB por arquivo e 24 MiB por envio.", textMuted, 11f).apply {
+            setPadding(0, dp(4), 0, 0)
+        })
+        renderSelectedAttachments()
         val reminder = field("Lembrete em minutos (opcional)", task?.reminderIntervalMinutes?.toString().orEmpty())
-        val categories = arrayOf("Vermelho", "Laranja", "Amarelo", "Verde")
-        val spinner = Spinner(this).apply { adapter = android.widget.ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_dropdown_item, categories); setSelection(categories.indexOf(task?.categoryColor).coerceAtLeast(0)); form.addView(this) }
+        val categories = listOf("Vermelho", "Laranja", "Amarelo", "Verde")
+        var selectedCategory = task?.categoryColor?.takeIf { it in categories } ?: "Verde"
+        val categoryChoices = linkedMapOf<String, View>()
+        form.addView(label("Prioridade", textMuted, 12f).apply { setPadding(0, dp(10), 0, dp(2)) })
+        val categoryRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, dp(6), 0, dp(8))
+        }
+        fun colorForCategory(category: String): Int = when (category) {
+            "Vermelho" -> Color.rgb(232, 72, 86)
+            "Laranja" -> Color.rgb(255, 140, 0)
+            "Amarelo" -> Color.rgb(255, 204, 0)
+            else -> Color.rgb(76, 175, 80)
+        }
+        fun refreshCategoryChoices() {
+            categoryChoices.forEach { (category, square) ->
+                square.background = GradientDrawable().apply {
+                    setColor(colorForCategory(category))
+                    cornerRadius = dp(4).toFloat()
+                    setStroke(dp(if (category == selectedCategory) 2 else 1), if (category == selectedCategory) Color.WHITE else border)
+                }
+                square.isSelected = category == selectedCategory
+            }
+        }
+        categories.forEach { category ->
+            val square = View(this).apply {
+                contentDescription = "Prioridade $category"
+                isFocusable = true
+                isClickable = true
+                setOnClickListener {
+                    selectedCategory = category
+                    refreshCategoryChoices()
+                }
+            }
+            categoryChoices[category] = square
+            categoryRow.addView(square, LinearLayout.LayoutParams(dp(30), dp(30)).apply { marginEnd = dp(9) })
+        }
+        refreshCategoryChoices()
+        form.addView(categoryRow)
         val scroll = ScrollView(this).apply { addView(form) }
         AlertDialog.Builder(this).setTitle(if (task == null) "Nova tarefa" else "Editar tarefa").setView(scroll)
             .setNegativeButton("Cancelar", null).setPositiveButton("Salvar", null).create().also { dialog ->
@@ -802,9 +937,28 @@ class MainActivity : Activity() {
                             val weight = if (i == steps.lastIndex) 100 - baseWeight * (steps.size - 1) else baseWeight
                             JmdroidTaskChecklistEntry(value, weight.toDouble(), old.getOrNull(i)?.isCompleted ?: false)
                         }
-                        val input = JmdroidTaskInput(name, description.text.toString(), interval, spinner.selectedItem.toString(), urls.text.toString(), attachments.text.toString(), entries)
+                        val input = JmdroidTaskInput(name, description.text.toString(), interval, selectedCategory, urls.text.toString(), task?.attachments.orEmpty(), entries)
                         val client = jmdApiClient ?: return@setOnClickListener
-                        backgroundExecutor.execute { try { if (task == null) client.createTask(input) else client.updateTask(task.id, input); runOnUiThread { dialog.dismiss(); loadTasks(); showBrandedMessage("Tarefa salva") } } catch (error: Exception) { runOnUiThread { showBrandedMessage(apiErrorMessage(error)) } } }
+                        dialog.dismiss()
+                        showBrandedMessage(if (selectedAttachments.isEmpty()) "Salvando tarefa…" else "Salvando tarefa e enviando anexos…", 60_000L)
+                        backgroundExecutor.execute {
+                            try {
+                                val savedTask = if (task == null) client.createTask(input) else client.updateTask(task.id, input)
+                                val resultMessage = if (selectedAttachments.isEmpty()) {
+                                    "Tarefa salva"
+                                } else {
+                                    try {
+                                        client.uploadTaskAttachments(savedTask.id, contentResolver, selectedAttachments.toList())
+                                        "Tarefa salva e anexos enviados"
+                                    } catch (uploadError: Exception) {
+                                        "Tarefa salva, mas o envio dos anexos falhou: ${apiErrorMessage(uploadError)}"
+                                    }
+                                }
+                                runOnUiThread { loadTasks(); showBrandedMessage(resultMessage, 5_000L) }
+                            } catch (error: Exception) {
+                                runOnUiThread { showBrandedMessage(apiErrorMessage(error), 5_000L) }
+                            }
+                        }
                     }
                 }
             }.show()
@@ -924,6 +1078,25 @@ class MainActivity : Activity() {
                 }
             }
         }
+    }
+
+    private fun describeTaskAttachment(uri: Uri): JmdroidAttachmentUpload {
+        var fileName = uri.lastPathSegment?.substringAfterLast('/')?.takeIf { it.isNotBlank() } ?: "anexo"
+        var sizeBytes: Long? = null
+        contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE), null, null, null)?.use { cursor ->
+            if (cursor.moveToFirst()) {
+                val nameColumn = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                if (nameColumn >= 0) cursor.getString(nameColumn)?.takeIf { it.isNotBlank() }?.let { fileName = it }
+                val sizeColumn = cursor.getColumnIndex(OpenableColumns.SIZE)
+                if (sizeColumn >= 0 && !cursor.isNull(sizeColumn)) sizeBytes = cursor.getLong(sizeColumn)
+            }
+        }
+        return JmdroidAttachmentUpload(
+            uri = uri,
+            fileName = fileName,
+            mimeType = contentResolver.getType(uri) ?: "application/octet-stream",
+            sizeBytes = sizeBytes
+        )
     }
 
     private fun showManualPairingInput() {
@@ -1481,5 +1654,9 @@ class MainActivity : Activity() {
         const val MAX_APK_BYTES = 100L * 1024L * 1024L
         const val INSTALL_SOURCE_REQUEST = 7101
         const val QR_SCAN_REQUEST = 7102
+        const val TASK_ATTACHMENT_PICKER_REQUEST = 7104
+        const val MAX_TASK_ATTACHMENT_FILES = 10
+        const val MAX_TASK_ATTACHMENT_BYTES = 20L * 1024L * 1024L
+        const val MAX_TASK_ATTACHMENT_TOTAL_BYTES = 24L * 1024L * 1024L
     }
 }

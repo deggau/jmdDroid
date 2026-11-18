@@ -1,5 +1,8 @@
 package com.jmd.android
 
+import android.content.ContentResolver
+import android.net.Uri
+import android.provider.OpenableColumns
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.WebSocket
@@ -103,6 +106,13 @@ internal data class JmdroidTaskInput(
     val checklist: List<JmdroidTaskChecklistEntry> = emptyList()
 )
 
+internal data class JmdroidAttachmentUpload(
+    val uri: Uri,
+    val fileName: String,
+    val mimeType: String,
+    val sizeBytes: Long?
+)
+
 private fun JSONObject.nullableString(key: String): String? {
     if (isNull(key)) return null
     return optString(key).takeIf { it.isNotBlank() && it != "null" }
@@ -197,6 +207,80 @@ internal class JmdroidApiClient(private val paired: PairedJmd) {
 
     fun deleteTask(taskId: String) {
         request("DELETE", "/api/v1/tasks/${encodePath(taskId)}")
+    }
+
+    fun uploadTaskAttachments(
+        taskId: String,
+        contentResolver: ContentResolver,
+        files: List<JmdroidAttachmentUpload>
+    ): JmdroidTask {
+        require(files.isNotEmpty() && files.size <= MAX_ATTACHMENT_FILES) { "Selecione de 1 a $MAX_ATTACHMENT_FILES arquivos." }
+        files.forEach { file ->
+            require(file.sizeBytes == null || file.sizeBytes in 1..MAX_SINGLE_ATTACHMENT_BYTES) {
+                "Cada arquivo deve ter até 20 MiB."
+            }
+        }
+        require(files.mapNotNull { it.sizeBytes }.sum() <= MAX_TOTAL_ATTACHMENT_BYTES) {
+            "O tamanho total dos anexos deve ser de até 24 MiB."
+        }
+
+        val boundary = "JMDroid-${java.util.UUID.randomUUID()}"
+        val connection = (URL("${paired.baseUrl.trimEnd('/')}/api/v1/tasks/${encodePath(taskId)}/attachments").openConnection() as HttpURLConnection).apply {
+            if (this is HttpsURLConnection) {
+                sslSocketFactory = requireNotNull(sslContext) { "A configuração HTTPS do JMD está incompleta." }.socketFactory
+            }
+            connectTimeout = 10_000
+            readTimeout = 120_000
+            requestMethod = "POST"
+            setRequestProperty("Accept", "application/json")
+            setRequestProperty("Authorization", "Bearer ${paired.accessToken}")
+            setRequestProperty("Content-Type", "multipart/form-data; boundary=$boundary")
+            instanceFollowRedirects = false
+            doOutput = true
+            setChunkedStreamingMode(64 * 1024)
+        }
+        try {
+            connection.outputStream.use { output ->
+                var totalBytes = 0L
+                files.forEach { file ->
+                    val safeName = file.fileName.substringAfterLast('/').substringAfterLast('\\')
+                        .replace("\"", "_").replace("\r", "_").replace("\n", "_").ifBlank { "anexo" }
+                    val mime = file.mimeType.takeIf { it.matches(Regex("[A-Za-z0-9!#$&^_.+-]+/[A-Za-z0-9!#$&^_.+-]+")) }
+                        ?: "application/octet-stream"
+                    output.write("--$boundary\r\n".toByteArray(Charsets.UTF_8))
+                    output.write("Content-Disposition: form-data; name=\"files\"; filename=\"$safeName\"\r\n".toByteArray(Charsets.UTF_8))
+                    output.write("Content-Type: $mime\r\n\r\n".toByteArray(Charsets.UTF_8))
+                    val input = contentResolver.openInputStream(file.uri)
+                        ?: throw IllegalArgumentException("Não foi possível abrir ${file.fileName}.")
+                    input.use { stream ->
+                        val buffer = ByteArray(64 * 1024)
+                        var fileBytes = 0L
+                        while (true) {
+                            val count = stream.read(buffer)
+                            if (count < 0) break
+                            fileBytes += count
+                            totalBytes += count
+                            require(fileBytes <= MAX_SINGLE_ATTACHMENT_BYTES) { "${file.fileName} excede o limite de 20 MiB." }
+                            require(totalBytes <= MAX_TOTAL_ATTACHMENT_BYTES) { "O tamanho total dos anexos excede 24 MiB." }
+                            output.write(buffer, 0, count)
+                        }
+                        require(fileBytes > 0) { "${file.fileName} está vazio." }
+                    }
+                    output.write("\r\n".toByteArray(Charsets.UTF_8))
+                }
+                output.write("--$boundary--\r\n".toByteArray(Charsets.UTF_8))
+            }
+            val status = connection.responseCode
+            val stream = if (status in 200..299) connection.inputStream else connection.errorStream
+            val json = stream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }?.let(::JSONObject) ?: JSONObject()
+            if (status !in 200..299) {
+                val error = json.optJSONObject("error")
+                throw ApiException(status, error?.optString("code").orEmpty(), error?.optString("message")?.takeIf { it.isNotBlank() } ?: "A API do JMD respondeu HTTP $status.")
+            }
+            return parseTask(json.getJSONObject("task"))
+        } finally {
+            connection.disconnect()
+        }
     }
 
     fun getTaskHistory(query: String, page: Int = 0, pageSize: Int = 30): JmdroidTaskHistoryPage {
@@ -303,6 +387,10 @@ internal class JmdroidApiClient(private val paired: PairedJmd) {
     private fun encodePath(value: String): String = java.net.URLEncoder.encode(value, "UTF-8").replace("+", "%20")
 
     companion object {
+        private const val MAX_ATTACHMENT_FILES = 10
+        private const val MAX_SINGLE_ATTACHMENT_BYTES = 20L * 1024L * 1024L
+        private const val MAX_TOTAL_ATTACHMENT_BYTES = 24L * 1024L * 1024L
+
         fun parsePairingQr(raw: String): PairingQr {
             val qr = JSONObject(raw.trim())
             require(qr.optString("type") == "jmd-pairing" && qr.optInt("version") == 1) { "Este QR code não é um pareamento JMD compatível." }
