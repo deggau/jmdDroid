@@ -2,10 +2,13 @@ package com.jmd.android
 
 import android.app.Activity
 import android.app.AlertDialog
+import android.app.TimePickerDialog
 import android.content.ClipData
+import android.content.BroadcastReceiver
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.graphics.Typeface
 import android.graphics.Color
 import android.graphics.drawable.GradientDrawable
@@ -14,6 +17,7 @@ import android.os.Build
 import android.os.Bundle
 import android.provider.OpenableColumns
 import android.provider.Settings
+import android.media.projection.MediaProjectionManager
 import android.view.Gravity
 import android.view.View
 import android.text.Editable
@@ -29,6 +33,7 @@ import android.widget.PopupMenu
 import android.widget.ScrollView
 import android.widget.TextView
 import androidx.core.content.FileProvider
+import android.content.pm.PackageManager
 import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
@@ -85,6 +90,30 @@ class MainActivity : Activity() {
     private var jmdApiClient: JmdroidApiClient? = null
     private var jmdWebSocket: WebSocket? = null
     private var jmdSessionReady = false
+    private var pendingScreenShare: ScreenShareRequest? = null
+    private var serviceReceiverRegistered = false
+    private val connectionServiceReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            when (intent?.action) {
+                JmdroidConnectionService.ACTION_CONNECTION_STATE -> {
+                    val connected = intent.getBooleanExtra(JmdroidConnectionService.EXTRA_CONNECTED, false)
+                    jmdSessionReady = connected
+                    val message = intent.getStringExtra(JmdroidConnectionService.EXTRA_MESSAGE).orEmpty()
+                    if (!connected && credentialStore.load() == null) {
+                        pairedJmd = null
+                        refreshConnectionIndicator(false)
+                        return
+                    }
+                    refreshConnectionIndicator(connected)
+                    connectionStatus.text = message
+                    if (connected && allCommands.isEmpty()) loadRemoteCommands()
+                }
+                JmdroidConnectionService.ACTION_SCREEN_SHARE_REQUEST -> {
+                    requestScreenShareConsent(intent.toScreenShareRequest())
+                }
+            }
+        }
+    }
     private lateinit var updateStatus: TextView
     private lateinit var updateButton: Button
     private lateinit var mainScreen: View
@@ -189,7 +218,38 @@ class MainActivity : Activity() {
         pairedJmd?.let {
             connectToJmd(it, loadCommands = true)
             scheduleHealthChecks()
+            requestScreenShareNotificationPermission()
         }
+        handleScreenShareIntent(intent)
+    }
+
+    override fun onStart() {
+        super.onStart()
+        val filter = IntentFilter().apply {
+            addAction(JmdroidConnectionService.ACTION_CONNECTION_STATE)
+            addAction(JmdroidConnectionService.ACTION_SCREEN_SHARE_REQUEST)
+        }
+        if (Build.VERSION.SDK_INT >= 33) {
+            registerReceiver(connectionServiceReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            @Suppress("DEPRECATION")
+            registerReceiver(connectionServiceReceiver, filter)
+        }
+        serviceReceiverRegistered = true
+    }
+
+    override fun onStop() {
+        if (serviceReceiverRegistered) {
+            unregisterReceiver(connectionServiceReceiver)
+            serviceReceiverRegistered = false
+        }
+        super.onStop()
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleScreenShareIntent(intent)
     }
 
     override fun onDestroy() {
@@ -198,7 +258,6 @@ class MainActivity : Activity() {
         messageHandler.removeCallbacks(taskHistorySearchRunnable)
         backgroundExecutor.shutdownNow()
         healthExecutor.shutdownNow()
-        jmdWebSocket?.close(1000, "App fechado")
         jmdApiClient?.close()
         super.onDestroy()
     }
@@ -219,6 +278,18 @@ class MainActivity : Activity() {
     @Deprecated("Use the activity result API")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == SCREEN_CAPTURE_REQUEST) {
+            val request = pendingScreenShare
+            pendingScreenShare = null
+            if (request != null) {
+                if (resultCode == RESULT_OK && data != null) {
+                    JmdroidConnectionService.grantProjection(this, request.shareId, resultCode, data)
+                } else {
+                    JmdroidConnectionService.denyProjection(this, request.shareId)
+                }
+            }
+            return
+        }
         if (requestCode == TASK_ATTACHMENT_PICKER_REQUEST) {
             val callback = taskAttachmentPickerCallback
             taskAttachmentPickerCallback = null
@@ -968,6 +1039,136 @@ class MainActivity : Activity() {
         startActivityForResult(Intent(this, QrScannerActivity::class.java), QR_SCAN_REQUEST)
     }
 
+    private fun showTaskNotificationSettings() {
+        val initial = TaskNotificationSettings.load(this)
+        var startMinute = initial.startMinute
+        var endMinute = initial.endMinute
+        fun formatTime(minutes: Int) = "%02d:%02d".format(minutes / 60, minutes % 60)
+        fun settingCheckBox(text: String, checked: Boolean) = CheckBox(this).apply {
+            this.text = text
+            isChecked = checked
+            setTextColor(textPrimary)
+            textSize = 14f
+            buttonTintList = android.content.res.ColorStateList.valueOf(accent)
+            setPadding(0, dp(4), 0, dp(4))
+        }
+
+        val content = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(20), dp(6), dp(20), dp(8))
+        }
+        val enabled = settingCheckBox("Receber notificações de tarefas novas", initial.enabled)
+        content.addView(enabled)
+        content.addView(label("Escolha quais cores podem gerar notificações:", textMuted, 13f).apply {
+            setPadding(0, dp(8), 0, dp(4))
+        })
+        val priorityChecks = TaskNotificationSettings.categories.associateWith { category ->
+            settingCheckBox(category, category in initial.priorities).also { checkBox ->
+                val color = when (category) {
+                    "Vermelho" -> Color.rgb(232, 72, 86)
+                    "Laranja" -> Color.rgb(255, 140, 0)
+                    "Amarelo" -> Color.rgb(255, 204, 0)
+                    else -> Color.rgb(76, 175, 80)
+                }
+                checkBox.buttonTintList = android.content.res.ColorStateList.valueOf(color)
+                content.addView(checkBox)
+            }
+        }
+        content.addView(View(this).apply { setBackgroundColor(border) }, LinearLayout.LayoutParams(-1, dp(1)).apply {
+            topMargin = dp(8); bottomMargin = dp(8)
+        })
+        val paused = settingCheckBox("Pausar notificações agora", initial.paused)
+        content.addView(paused)
+        val limitHours = settingCheckBox("Notificar somente dentro de um horário", initial.limitToHours)
+        content.addView(limitHours)
+        val timeRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        val startTime = Button(this).apply { isAllCaps = false; setTextColor(accent); text = "Início ${formatTime(startMinute)}" }
+        val endTime = Button(this).apply { isAllCaps = false; setTextColor(accent); text = "Fim ${formatTime(endMinute)}" }
+        startTime.setOnClickListener {
+            TimePickerDialog(this, { _, hour, minute ->
+                startMinute = hour * 60 + minute
+                startTime.text = "Início ${formatTime(startMinute)}"
+            }, startMinute / 60, startMinute % 60, true).show()
+        }
+        endTime.setOnClickListener {
+            TimePickerDialog(this, { _, hour, minute ->
+                endMinute = hour * 60 + minute
+                endTime.text = "Fim ${formatTime(endMinute)}"
+            }, endMinute / 60, endMinute % 60, true).show()
+        }
+        timeRow.addView(startTime, LinearLayout.LayoutParams(0, -2, 1f))
+        timeRow.addView(endTime, LinearLayout.LayoutParams(0, -2, 1f))
+        content.addView(timeRow)
+        limitHours.setOnCheckedChangeListener { _, checked -> timeRow.visibility = if (checked) View.VISIBLE else View.GONE }
+        timeRow.visibility = if (initial.limitToHours) View.VISIBLE else View.GONE
+        content.addView(label("O Android consulta a API em segundo plano aproximadamente a cada 15 minutos. Na primeira consulta, as tarefas existentes são registradas sem gerar notificações.", textMuted, 12f).apply {
+            setLineSpacing(dp(2).toFloat(), 1f)
+            setPadding(0, dp(8), 0, 0)
+        })
+
+        val scroll = ScrollView(this).apply { addView(content) }
+        AlertDialog.Builder(this)
+            .setTitle("Notificações de tarefas")
+            .setView(scroll)
+            .setNegativeButton("Cancelar", null)
+            .setPositiveButton("Salvar", null)
+            .create().also { dialog ->
+                dialog.setOnShowListener {
+                    dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                        val selectedPriorities = priorityChecks.filterValues { it.isChecked }.keys
+                        if (enabled.isChecked && selectedPriorities.isEmpty()) {
+                            showBrandedMessage("Selecione pelo menos uma prioridade.")
+                            return@setOnClickListener
+                        }
+                        val config = TaskNotificationConfig(
+                            enabled.isChecked,
+                            selectedPriorities,
+                            paused.isChecked,
+                            limitHours.isChecked,
+                            startMinute,
+                            endMinute
+                        )
+                        TaskNotificationSettings.save(this, config)
+                        if (config.enabled) {
+                            TaskNotificationWorker.schedule(this)
+                            if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+                                requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), TASK_NOTIFICATIONS_PERMISSION_REQUEST)
+                            } else {
+                                showBrandedMessage("Notificações de tarefas ativadas.")
+                            }
+                        } else {
+                            TaskNotificationWorker.cancel(this)
+                            showBrandedMessage("Notificações de tarefas desativadas.")
+                        }
+                        dialog.dismiss()
+                    }
+                }
+                dialog.show()
+            }
+    }
+
+    @Deprecated("Use the Activity Result API")
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == SCREEN_SHARE_NOTIFICATIONS_PERMISSION_REQUEST) {
+            showBrandedMessage(if (grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED) {
+                "Notificações ativadas para pedidos de compartilhamento."
+            } else {
+                "Sem notificações, pedidos de compartilhamento recebidos em segundo plano podem não aparecer."
+            }, 4_000L)
+        }
+        if (requestCode == TASK_NOTIFICATIONS_PERMISSION_REQUEST) {
+            showBrandedMessage(if (grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED) {
+                "Permissão de notificações concedida."
+            } else {
+                "Permita notificações do JMDroid nas configurações do Android."
+            }, 4_000L)
+        }
+    }
+
     private fun showSecondaryMenu(anchor: View) {
         PopupMenu(this, anchor).apply {
             menu.add("Informações do aparelho").setOnMenuItemClickListener {
@@ -984,6 +1185,10 @@ class MainActivity : Activity() {
             }
             menu.add("Verificar atualizações").setOnMenuItemClickListener {
                 openUpdateScreen()
+                true
+            }
+            menu.add("Notificações de tarefas").setOnMenuItemClickListener {
+                showTaskNotificationSettings()
                 true
             }
             if (pairedJmd == null) {
@@ -1011,7 +1216,7 @@ class MainActivity : Activity() {
 
     private fun disconnectFromJmd() {
         messageHandler.removeCallbacks(healthCheckRunnable)
-        jmdWebSocket?.close(1000, "Desconectado pelo usuário")
+        JmdroidConnectionService.stop(this)
         jmdWebSocket = null
         jmdApiClient?.close()
         jmdApiClient = null
@@ -1172,56 +1377,53 @@ class MainActivity : Activity() {
     }
 
     private fun connectToJmd(paired: PairedJmd, loadCommands: Boolean) {
-        jmdWebSocket?.close(1000, "Reconectando")
+        jmdWebSocket = null
         jmdApiClient?.close()
         jmdApiClient = JmdroidApiClient(paired)
+        jmdSessionReady = false
         connectionStatus.text = "Conectando à sessão segura do JMD…"
-        val socket = try {
-            jmdApiClient!!.connectSession(object : WebSocketListener() {
-                override fun onOpen(webSocket: WebSocket, response: Response) {
-                    runOnUiThread {
-                        jmdSessionReady = true
-                        connectionStatus.text = "Sessão ativa no JMD."
-                        if (loadCommands) loadRemoteCommands()
-                    }
-                }
+        refreshConnectionIndicator(false)
+        JmdroidConnectionService.connect(this, reconnect = true)
+        if (loadCommands) loadRemoteCommands()
+    }
 
-                override fun onMessage(webSocket: WebSocket, text: String) {
-                    if (!text.contains("session.ready")) return
-                    runOnUiThread { connectionStatus.text = "Sessão segura ativa no JMD." }
-                }
+    private fun handleScreenShareIntent(intent: Intent?) {
+        if (intent?.action != JmdroidConnectionService.ACTION_OPEN_SCREEN_SHARE) return
+        val request = intent.toScreenShareRequest()
+        intent.action = null
+        intent.removeExtra(JmdroidConnectionService.EXTRA_SHARE_ID)
+        if (request.shareId.isNotBlank()) requestScreenShareConsent(request)
+    }
 
-                override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-                    runOnUiThread {
-                        if (jmdWebSocket !== webSocket) return@runOnUiThread
-                        jmdSessionReady = false
-                        connectionStatus.text = "Sessão do JMD encerrada."
-                    }
-                }
+    private fun Intent.toScreenShareRequest() = ScreenShareRequest(
+        shareId = getStringExtra(JmdroidConnectionService.EXTRA_SHARE_ID).orEmpty(),
+        maxFps = getIntExtra(JmdroidConnectionService.EXTRA_MAX_FPS, 12).coerceIn(1, 60),
+        maxDimension = getIntExtra(JmdroidConnectionService.EXTRA_MAX_DIMENSION, 2400).coerceIn(320, 2400),
+        maxFrameBytes = getIntExtra(JmdroidConnectionService.EXTRA_MAX_FRAME_BYTES, 2 * 1024 * 1024).coerceIn(64 * 1024, 2 * 1024 * 1024),
+        quality = getIntExtra(JmdroidConnectionService.EXTRA_QUALITY, 65).coerceIn(0, 100)
+    )
 
-                override fun onFailure(webSocket: WebSocket, error: Throwable, response: Response?) {
-                    runOnUiThread {
-                        if (jmdWebSocket !== webSocket) return@runOnUiThread
-                        jmdSessionReady = false
-                        if (response?.code == 401 || response?.code == 403) {
-                            credentialStore.clear()
-                            pairedJmd = null
-                            pairingButton.visibility = View.VISIBLE
-                            commandSearch.visibility = View.GONE
-                            commandContainer.visibility = View.GONE
-                            messageHandler.removeCallbacks(healthCheckRunnable)
-                            refreshConnectionIndicator(false)
-                        }
-                        connectionStatus.text = error.message ?: "Conexão com o JMD interrompida."
-                    }
-                }
-            })
-        } catch (error: Exception) {
-            connectionStatus.text = error.message ?: "Não foi possível abrir a sessão do JMD."
+    private fun requestScreenShareConsent(request: ScreenShareRequest) {
+        if (pendingScreenShare?.shareId == request.shareId) return
+        if (pendingScreenShare != null) {
+            JmdroidConnectionService.denyProjection(this, request.shareId)
             return
         }
-        jmdWebSocket?.close(1000, "Nova conexão")
-        jmdWebSocket = socket
+        pendingScreenShare = request
+        try {
+            val manager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+            @Suppress("DEPRECATION")
+            startActivityForResult(manager.createScreenCaptureIntent(), SCREEN_CAPTURE_REQUEST)
+        } catch (error: Exception) {
+            pendingScreenShare = null
+            JmdroidConnectionService.denyProjection(this, request.shareId)
+            showBrandedMessage(error.message ?: "Não foi possível abrir a autorização de captura.", 4_000L)
+        }
+    }
+
+    private fun requestScreenShareNotificationPermission() {
+        if (Build.VERSION.SDK_INT < 33 || checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED) return
+        requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), SCREEN_SHARE_NOTIFICATIONS_PERMISSION_REQUEST)
     }
 
     private fun loadRemoteCommands() {
@@ -1295,7 +1497,8 @@ class MainActivity : Activity() {
             setPadding(dp(20), dp(8), dp(20), dp(8))
         }
         val workflowFields = linkedMapOf<String, EditText>()
-        val textInput = if (!command.isWorkflow) EditText(this).apply {
+        val isScreenShare = command.id == "screenShare"
+        val textInput = if (!command.isWorkflow && !isScreenShare) EditText(this).apply {
             hint = "Texto para enviar ao computador"
             setTextColor(textPrimary)
             setHintTextColor(textMuted)
@@ -1305,7 +1508,9 @@ class MainActivity : Activity() {
             inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_FLAG_MULTI_LINE
             form.addView(this)
         } else null
-        if (command.isWorkflow) {
+        if (isScreenShare) {
+            form.addView(label("O Android solicitará autorização do sistema antes de compartilhar a tela.", textMuted, 13f))
+        } else if (command.isWorkflow) {
             form.addView(label("O workflow será executado no JMD desktop.", textMuted, 13f).apply {
                 setPadding(0, 0, 0, dp(8))
             })
@@ -1327,14 +1532,20 @@ class MainActivity : Activity() {
         }
         AlertDialog.Builder(this)
             .setTitle(command.name)
-            .setMessage(if (command.isWorkflow) "Os dados serão enviados à API para execução no desktop." else "O texto será enviado à API para execução no desktop.")
+            .setMessage(when {
+                isScreenShare -> "O pedido será enviado ao computador."
+                command.isWorkflow -> "Os dados serão enviados à API para execução no desktop."
+                else -> "O texto será enviado à API para execução no desktop."
+            })
             .setView(form)
             .setNegativeButton("Cancelar", null)
             .setPositiveButton("Executar", null)
             .create().also { dialog ->
                 dialog.setOnShowListener {
                     dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
-                        val payload = if (command.isWorkflow) {
+                        val payload = if (isScreenShare) {
+                            JSONObject()
+                        } else if (command.isWorkflow) {
                             val variables = JSONObject()
                             workflowFields.forEach { (name, field) ->
                                 if (field.text.length > 10_000) {
@@ -1374,10 +1585,15 @@ class MainActivity : Activity() {
                 val output = response.optJSONObject("result")?.optString("text").orEmpty()
                 val error = response.optJSONObject("error")?.optString("message").orEmpty()
                 runOnUiThread {
-                    connectionStatus.text = if (succeeded) "${command.name} concluído." else "${command.name} falhou."
-                    if (succeeded) showResultDialog(command.name, output)
-                    else AlertDialog.Builder(this).setTitle("Não foi possível executar")
-                        .setMessage(error.ifBlank { "O JMD não conseguiu executar o comando." }).setPositiveButton("OK", null).show()
+                    if (command.id == "screenShare" && succeeded) {
+                        connectionStatus.text = "Pedido enviado. Aguardando autorização do Android…"
+                        showBrandedMessage("Pedido enviado ao JMD. Autorize o compartilhamento na tela do Android.", 5_000L)
+                    } else {
+                        connectionStatus.text = if (succeeded) "${command.name} concluído." else "${command.name} falhou."
+                        if (succeeded) showResultDialog(command.name, output)
+                        else AlertDialog.Builder(this).setTitle("Não foi possível executar")
+                            .setMessage(error.ifBlank { "O JMD não conseguiu executar o comando." }).setPositiveButton("OK", null).show()
+                    }
                 }
             } catch (error: Exception) {
                 runOnUiThread {
@@ -1654,6 +1870,9 @@ class MainActivity : Activity() {
         const val MAX_APK_BYTES = 100L * 1024L * 1024L
         const val INSTALL_SOURCE_REQUEST = 7101
         const val QR_SCAN_REQUEST = 7102
+        const val TASK_NOTIFICATIONS_PERMISSION_REQUEST = 7105
+        const val SCREEN_CAPTURE_REQUEST = 7106
+        const val SCREEN_SHARE_NOTIFICATIONS_PERMISSION_REQUEST = 7107
         const val TASK_ATTACHMENT_PICKER_REQUEST = 7104
         const val MAX_TASK_ATTACHMENT_FILES = 10
         const val MAX_TASK_ATTACHMENT_BYTES = 20L * 1024L * 1024L

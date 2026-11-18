@@ -23,8 +23,8 @@ android {
         applicationId = "com.jmd.android"
         minSdk = 23
         targetSdk = 35
-        versionCode = 13
-        versionName = "0.6.4"
+        versionCode = 14
+        versionName = "0.6.5"
     }
 
     signingConfigs {
@@ -52,5 +52,6 @@ dependencies {
     implementation("androidx.camera:camera-view:1.4.2")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("com.google.mlkit:barcode-scanning:17.3.0")
+    implementation("androidx.work:work-runtime-ktx:2.10.0")
     testImplementation("junit:junit:4.13.2")
 }
