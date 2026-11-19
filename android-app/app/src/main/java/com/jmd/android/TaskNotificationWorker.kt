@@ -19,6 +19,9 @@ import androidx.work.WorkManager
 import androidx.work.Worker
 import androidx.work.WorkerParameters
 import java.util.Calendar
+import java.text.SimpleDateFormat
+import java.util.Locale
+import java.util.TimeZone
 import java.util.concurrent.TimeUnit
 
 internal class TaskNotificationWorker(context: Context, params: WorkerParameters) : Worker(context, params) {
@@ -34,16 +37,41 @@ internal class TaskNotificationWorker(context: Context, params: WorkerParameters
         return try {
             val tasks = client.getTasks("open")
             val currentIds = tasks.map { it.id }.toSet()
+            val nowMillis = System.currentTimeMillis()
             if (!TaskNotificationSettings.hasBaseline(applicationContext)) {
                 TaskNotificationSettings.saveSeenIds(applicationContext, currentIds, initialized = true)
+                tasks.filter { it.reminderIntervalMinutes != null && it.reminderIntervalMinutes > 0 }
+                    .forEach { TaskNotificationSettings.saveReminderNotifiedAt(applicationContext, it.id, nowMillis) }
+                TaskNotificationSettings.retainReminderTasks(applicationContext, currentIds)
                 return Result.success()
             }
 
             val previousIds = TaskNotificationSettings.seenIds(applicationContext)
             val newTasks = tasks.filter { it.id !in previousIds }
+            val newTaskIds = newTasks.map { it.id }.toSet()
             val now = Calendar.getInstance()
             val minuteOfDay = now.get(Calendar.HOUR_OF_DAY) * 60 + now.get(Calendar.MINUTE)
-            newTasks.filter { config.shouldNotify(it.categoryColor, minuteOfDay) }.forEach(::showNotification)
+            newTasks.filter { config.shouldNotify(it.categoryColor, minuteOfDay) }.forEach { showNotification(it, reminder = false) }
+
+            tasks.forEach { task ->
+                val intervalMillis = task.reminderIntervalMinutes?.takeIf { it > 0 }?.toLong()?.times(60_000L)
+                    ?: return@forEach
+                val lastNotifiedAt = TaskNotificationSettings.reminderNotifiedAt(applicationContext, task.id)
+                    ?: parseTimestamp(task.lastReminderAt) ?: parseTimestamp(task.createdAt) ?: nowMillis
+
+                if (task.pausedAt != null) {
+                    TaskNotificationSettings.saveReminderNotifiedAt(applicationContext, task.id, nowMillis)
+                } else if (task.id !in newTaskIds &&
+                    nowMillis - lastNotifiedAt >= intervalMillis &&
+                    config.shouldNotify(task.categoryColor, minuteOfDay)
+                ) {
+                    showNotification(task, reminder = true)
+                    TaskNotificationSettings.saveReminderNotifiedAt(applicationContext, task.id, nowMillis)
+                } else if (TaskNotificationSettings.reminderNotifiedAt(applicationContext, task.id) == null) {
+                    TaskNotificationSettings.saveReminderNotifiedAt(applicationContext, task.id, lastNotifiedAt)
+                }
+            }
+            TaskNotificationSettings.retainReminderTasks(applicationContext, currentIds)
             TaskNotificationSettings.saveSeenIds(applicationContext, previousIds + currentIds, initialized = true)
             Result.success()
         } catch (error: ApiException) {
@@ -55,7 +83,7 @@ internal class TaskNotificationWorker(context: Context, params: WorkerParameters
         }
     }
 
-    private fun showNotification(task: JmdroidTask) {
+    private fun showNotification(task: JmdroidTask, reminder: Boolean) {
         if (Build.VERSION.SDK_INT >= 33 && applicationContext.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) return
         val manager = applicationContext.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         if (Build.VERSION.SDK_INT >= 26) {
@@ -76,7 +104,7 @@ internal class TaskNotificationWorker(context: Context, params: WorkerParameters
         )
         val builder = NotificationCompat.Builder(applicationContext, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_stat_jmd)
-            .setContentTitle("Nova tarefa · ${task.categoryColor}")
+            .setContentTitle(if (reminder) "Lembrete de tarefa · ${task.categoryColor}" else "Nova tarefa · ${task.categoryColor}")
             .setContentText(task.title)
             .setStyle(NotificationCompat.BigTextStyle().bigText(task.description.ifBlank { task.title }))
             .setContentIntent(pendingIntent)
@@ -86,6 +114,23 @@ internal class TaskNotificationWorker(context: Context, params: WorkerParameters
             NotificationManagerCompat.from(applicationContext).notify(task.id.hashCode(), builder.build())
         } catch (_: SecurityException) {
             // Android 13+ can revoke notification permission after scheduling.
+        }
+    }
+
+    private fun parseTimestamp(value: String?): Long? {
+        if (value.isNullOrBlank()) return null
+        val normalized = value.trim()
+            .replace(Regex("\\.(\\d{3})\\d+(?=Z|[+-]\\d{2}:?\\d{2}$)")) { ".${it.groupValues[1]}" }
+            .replace(Regex("Z$"), "+0000")
+            .replace(Regex("([+-]\\d{2}):(\\d{2})$")) { it.groupValues[1] + it.groupValues[2] }
+        val patterns = listOf("yyyy-MM-dd'T'HH:mm:ss.SSSZ", "yyyy-MM-dd'T'HH:mm:ssZ")
+        return patterns.firstNotNullOfOrNull { pattern ->
+            try {
+                SimpleDateFormat(pattern, Locale.US).apply {
+                    isLenient = false
+                    timeZone = TimeZone.getTimeZone("UTC")
+                }.parse(normalized)?.time
+            } catch (_: Exception) { null }
         }
     }
 

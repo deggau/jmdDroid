@@ -36,6 +36,7 @@ internal object TaskNotificationSettings {
     private const val KEY_END_MINUTE = "end_minute"
     private const val KEY_INITIALIZED = "initialized"
     private const val KEY_SEEN_IDS = "seen_ids"
+    private const val KEY_REMINDER_PREFIX = "reminder_notified_"
 
     fun load(context: Context): TaskNotificationConfig {
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -74,4 +75,26 @@ internal object TaskNotificationSettings {
             .putBoolean(KEY_INITIALIZED, initialized)
             .apply()
     }
+
+    fun reminderNotifiedAt(context: Context, taskId: String): Long? =
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .takeIf { it.contains(reminderKey(taskId)) }
+            ?.getLong(reminderKey(taskId), 0L)
+
+    fun saveReminderNotifiedAt(context: Context, taskId: String, timestamp: Long) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit()
+            .putLong(reminderKey(taskId), timestamp)
+            .apply()
+    }
+
+    fun retainReminderTasks(context: Context, taskIds: Set<String>) {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val validKeys = taskIds.map(::reminderKey).toSet()
+        prefs.edit().apply {
+            prefs.all.keys.filter { it.startsWith(KEY_REMINDER_PREFIX) && it !in validKeys }
+                .forEach(::remove)
+        }.apply()
+    }
+
+    private fun reminderKey(taskId: String) = "$KEY_REMINDER_PREFIX$taskId"
 }

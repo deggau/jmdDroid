@@ -638,10 +638,11 @@ internal class JmdroidConnectionService : Service() {
     }
 
     private fun buildServiceNotification(sharing: Boolean = false): Notification {
+        val computerName = JmdroidCredentialStore(this).load()?.computerName?.takeIf { it.isNotBlank() } ?: "computador"
         val notification = NotificationCompat.Builder(this, SERVICE_CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_stat_jmd)
             .setContentTitle(if (sharing) "Compartilhando tela com o JMD" else "Conectado ao JMD")
-            .setContentText(if (sharing) "A captura está ativa. Toque na notificação do Android para interrompê-la." else "A sessão permanece ativa para receber pedidos do computador.")
+            .setContentText(if (sharing) "A captura está ativa. Toque na notificação do Android para interrompê-la." else "Conectado a \"$computerName\"")
             .setOngoing(true)
             .setCategory(NotificationCompat.CATEGORY_SERVICE)
         if (sharing) notification.addAction(0, "Parar", servicePendingIntent(ACTION_STOP_SHARE))
