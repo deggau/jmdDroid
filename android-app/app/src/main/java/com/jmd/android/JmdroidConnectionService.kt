@@ -179,9 +179,15 @@ internal class JmdroidConnectionService : Service() {
                     stopScreenShare(sendStopped = false)
                     finishDesktopScreenShare(desktopScreenShareId, "Conexão com o JMD interrompida.")
                     if (response?.code == 401 || response?.code == 403) {
-                        JmdroidCredentialStore(this@JmdroidConnectionService).clear()
-                        broadcastState(false, "Pareamento expirado. Conecte novamente ao JMD.")
-                        stopSelf()
+                        val store = JmdroidCredentialStore(this@JmdroidConnectionService)
+                        store.load()?.let(store::remove)
+                        if (store.active() != null) {
+                            broadcastState(false, "Pareamento expirado neste computador. Alternando para outro computador salvo.")
+                            scheduleReconnect()
+                        } else {
+                            broadcastState(false, "Pareamento expirado. Conecte novamente ao JMD.")
+                            stopSelf()
+                        }
                     } else {
                         broadcastState(false, error.message ?: "Conexão com o JMD interrompida.")
                         scheduleReconnect()
@@ -196,8 +202,12 @@ internal class JmdroidConnectionService : Service() {
 
     private fun reconnect() {
         mainHandler.removeCallbacks(reconnectRunnable)
+        stopScreenShare(sendStopped = true)
+        finishDesktopScreenShare(desktopScreenShareId, "Computador ativo alterado.")
         webSocket?.close(1000, "Reconectando")
         webSocket = null
+        apiClient?.close()
+        apiClient = null
         connectSocket()
     }
 
