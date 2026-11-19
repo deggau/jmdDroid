@@ -111,6 +111,13 @@ class MainActivity : Activity() {
                 JmdroidConnectionService.ACTION_SCREEN_SHARE_REQUEST -> {
                     requestScreenShareConsent(intent.toScreenShareRequest())
                 }
+                JmdroidConnectionService.ACTION_DESKTOP_SCREEN_SHARE_REQUEST -> {
+                    val shareId = intent.getStringExtra(JmdroidConnectionService.EXTRA_SHARE_ID).orEmpty()
+                    if (shareId.isNotBlank()) {
+                        startActivity(Intent(this@MainActivity, DesktopScreenViewerActivity::class.java)
+                            .putExtra(JmdroidConnectionService.EXTRA_SHARE_ID, shareId))
+                    }
+                }
             }
         }
     }
@@ -228,6 +235,7 @@ class MainActivity : Activity() {
         val filter = IntentFilter().apply {
             addAction(JmdroidConnectionService.ACTION_CONNECTION_STATE)
             addAction(JmdroidConnectionService.ACTION_SCREEN_SHARE_REQUEST)
+            addAction(JmdroidConnectionService.ACTION_DESKTOP_SCREEN_SHARE_REQUEST)
         }
         if (Build.VERSION.SDK_INT >= 33) {
             registerReceiver(connectionServiceReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
@@ -1498,7 +1506,9 @@ class MainActivity : Activity() {
         }
         val workflowFields = linkedMapOf<String, EditText>()
         val isScreenShare = command.id == "screenShare"
-        val textInput = if (!command.isWorkflow && !isScreenShare) EditText(this).apply {
+        val isDesktopScreenShare = command.id == "desktopScreenShare"
+        val isScreenShareCommand = isScreenShare || isDesktopScreenShare
+        val textInput = if (!command.isWorkflow && !isScreenShareCommand) EditText(this).apply {
             hint = "Texto para enviar ao computador"
             setTextColor(textPrimary)
             setHintTextColor(textMuted)
@@ -1510,6 +1520,8 @@ class MainActivity : Activity() {
         } else null
         if (isScreenShare) {
             form.addView(label("O Android solicitará autorização do sistema antes de compartilhar a tela.", textMuted, 13f))
+        } else if (isDesktopScreenShare) {
+            form.addView(label("O JMD enviará a tela principal do computador para este celular. A visualização pode ser interrompida a qualquer momento.", textMuted, 13f))
         } else if (command.isWorkflow) {
             form.addView(label("O workflow será executado no JMD desktop.", textMuted, 13f).apply {
                 setPadding(0, 0, 0, dp(8))
@@ -1534,6 +1546,7 @@ class MainActivity : Activity() {
             .setTitle(command.name)
             .setMessage(when {
                 isScreenShare -> "O pedido será enviado ao computador."
+                isDesktopScreenShare -> "O pedido será enviado ao computador pareado."
                 command.isWorkflow -> "Os dados serão enviados à API para execução no desktop."
                 else -> "O texto será enviado à API para execução no desktop."
             })
@@ -1543,7 +1556,7 @@ class MainActivity : Activity() {
             .create().also { dialog ->
                 dialog.setOnShowListener {
                     dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
-                        val payload = if (isScreenShare) {
+                        val payload = if (isScreenShareCommand) {
                             JSONObject()
                         } else if (command.isWorkflow) {
                             val variables = JSONObject()
@@ -1588,6 +1601,9 @@ class MainActivity : Activity() {
                     if (command.id == "screenShare" && succeeded) {
                         connectionStatus.text = "Pedido enviado. Aguardando autorização do Android…"
                         showBrandedMessage("Pedido enviado ao JMD. Autorize o compartilhamento na tela do Android.", 5_000L)
+                    } else if (command.id == "desktopScreenShare" && succeeded) {
+                        connectionStatus.text = "Pedido enviado. Abrindo a tela do computador…"
+                        showBrandedMessage("Pedido enviado ao JMD. Abrindo o visualizador…", 4_000L)
                     } else {
                         connectionStatus.text = if (succeeded) "${command.name} concluído." else "${command.name} falhou."
                         if (succeeded) showResultDialog(command.name, output)

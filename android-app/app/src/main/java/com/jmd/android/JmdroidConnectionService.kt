@@ -46,6 +46,8 @@ internal class JmdroidConnectionService : Service() {
     private val mainHandler = Handler(android.os.Looper.getMainLooper())
     private var shareRequest: ScreenShareRequest? = null
     private var lastShareId: String? = null
+    @Volatile private var desktopScreenShareId: String? = null
+    @Volatile private var desktopScreenShareStopping = false
     private var mediaProjection: MediaProjection? = null
     private var imageReader: ImageReader? = null
     private var virtualDisplay: VirtualDisplay? = null
@@ -80,6 +82,12 @@ internal class JmdroidConnectionService : Service() {
                 stopSelf()
             }
             ACTION_STOP_SHARE -> stopScreenShare(sendStopped = true)
+            ACTION_VIEWER_READY -> sendDesktopViewerReady(
+                intent.getStringExtra(EXTRA_SHARE_ID).orEmpty(),
+                intent.getIntExtra(EXTRA_VIEWER_WIDTH, 0),
+                intent.getIntExtra(EXTRA_VIEWER_HEIGHT, 0)
+            )
+            ACTION_VIEWER_STOP -> requestStopDesktopScreenShare(intent.getStringExtra(EXTRA_SHARE_ID).orEmpty())
             ACTION_RECONNECT -> reconnect()
             ACTION_SCREEN_SHARE_GRANTED -> {
                 @Suppress("DEPRECATION")
@@ -136,13 +144,28 @@ internal class JmdroidConnectionService : Service() {
                         "session.ready" -> broadcastState(true, "Sessão segura ativa no JMD.")
                         "screen_share.start" -> receiveShareRequest(message)
                         "screen_share.stop" -> receiveShareStop(message.optString("shareId"))
+                        "desktop_screen_share.start" -> receiveDesktopScreenShareRequest(message)
+                        "desktop_screen_share.stop" -> receiveDesktopScreenShareStop(message.optString("shareId"))
+                        "desktop_screen_share.stopped" -> finishDesktopScreenShare(message.optString("shareId"))
+                        "desktop_screen_share.error" -> finishDesktopScreenShare(
+                            message.optString("shareId"), message.optString("message").ifBlank { "O JMD não conseguiu capturar a tela." }
+                        )
                     }
+                }
+
+                override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
+                    if (this@JmdroidConnectionService.webSocket !== webSocket) return
+                    if (desktopScreenShareId == null || desktopScreenShareStopping || bytes.size > DESKTOP_FRAME_MAX_BYTES) return
+                    if (bytes.size < 4 || bytes[0] != 0xff.toByte() || bytes[1] != 0xd8.toByte() ||
+                        bytes[bytes.size - 2] != 0xff.toByte() || bytes[bytes.size - 1] != 0xd9.toByte()) return
+                    desktopFrameListener?.invoke(bytes.toByteArray())
                 }
 
                 override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
                     if (this@JmdroidConnectionService.webSocket !== webSocket) return
                     this@JmdroidConnectionService.webSocket = null
                     stopScreenShare(sendStopped = false)
+                    finishDesktopScreenShare(desktopScreenShareId, "Conexão com o JMD interrompida.")
                     broadcastState(false, "Sessão do JMD encerrada.")
                     scheduleReconnect()
                 }
@@ -151,6 +174,7 @@ internal class JmdroidConnectionService : Service() {
                     if (this@JmdroidConnectionService.webSocket !== webSocket) return
                     this@JmdroidConnectionService.webSocket = null
                     stopScreenShare(sendStopped = false)
+                    finishDesktopScreenShare(desktopScreenShareId, "Conexão com o JMD interrompida.")
                     if (response?.code == 401 || response?.code == 403) {
                         JmdroidCredentialStore(this@JmdroidConnectionService).clear()
                         broadcastState(false, "Pareamento expirado. Conecte novamente ao JMD.")
@@ -206,6 +230,83 @@ internal class JmdroidConnectionService : Service() {
         stopScreenShare(sendStopped = true)
     }
 
+    private fun receiveDesktopScreenShareRequest(message: JSONObject) {
+        val shareId = message.optString("shareId")
+        if (shareId.isBlank()) return
+        val activeId = desktopScreenShareId
+        if (activeId != null && activeId != shareId) {
+            sendControl("desktop_screen_share.error", shareId, "outra visualização está ativa")
+            return
+        }
+        desktopScreenShareId = shareId
+        desktopScreenShareStopping = false
+        broadcastDesktopScreenShareRequest(shareId)
+        showDesktopScreenShareNotification(shareId)
+    }
+
+    private fun receiveDesktopScreenShareStop(shareId: String) {
+        if (desktopScreenShareId != shareId) return
+        sendControl("desktop_screen_share.stopped", shareId)
+        finishDesktopScreenShare(shareId)
+    }
+
+    private fun showDesktopScreenShareNotification(shareId: String) {
+        val intent = Intent(this, DesktopScreenViewerActivity::class.java).apply {
+            action = ACTION_OPEN_DESKTOP_SCREEN_VIEWER
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
+            putExtra(EXTRA_SHARE_ID, shareId)
+        }
+        val pendingIntent = PendingIntent.getActivity(
+            this, DESKTOP_SHARE_NOTIFICATION_ID, intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        val notification = NotificationCompat.Builder(this, SHARE_CHANNEL_ID)
+            .setSmallIcon(R.drawable.ic_stat_jmd)
+            .setContentTitle("Ver tela do computador")
+            .setContentText("Toque para abrir o visualizador do JMD.")
+            .setContentIntent(pendingIntent)
+            .setAutoCancel(true)
+            .setCategory(NotificationCompat.CATEGORY_EVENT)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .build()
+        try { NotificationManagerCompat.from(this).notify(DESKTOP_SHARE_NOTIFICATION_ID, notification) }
+        catch (_: SecurityException) { }
+    }
+
+    private fun broadcastDesktopScreenShareRequest(shareId: String) {
+        sendBroadcast(Intent(ACTION_DESKTOP_SCREEN_SHARE_REQUEST).setPackage(packageName)
+            .putExtra(EXTRA_SHARE_ID, shareId))
+    }
+
+    private fun broadcastDesktopScreenShareEnded(shareId: String?, message: String? = null) {
+        if (shareId == null) return
+        sendBroadcast(Intent(ACTION_DESKTOP_SCREEN_SHARE_ENDED).setPackage(packageName)
+            .putExtra(EXTRA_SHARE_ID, shareId).putExtra(EXTRA_MESSAGE, message.orEmpty()))
+    }
+
+    private fun finishDesktopScreenShare(shareId: String?, message: String? = null) {
+        if (shareId == null || desktopScreenShareId != shareId) return
+        desktopScreenShareId = null
+        desktopScreenShareStopping = false
+        desktopFrameListener = null
+        notificationManager().cancel(DESKTOP_SHARE_NOTIFICATION_ID)
+        broadcastDesktopScreenShareEnded(shareId, message)
+    }
+
+    private fun sendDesktopViewerReady(shareId: String, width: Int, height: Int) {
+        if (desktopScreenShareId != shareId || width <= 0 || height <= 0) return
+        desktopScreenShareStopping = false
+        notificationManager().cancel(DESKTOP_SHARE_NOTIFICATION_ID)
+        sendControl("desktop_screen_share.ready", shareId, width = width, height = height)
+    }
+
+    private fun requestStopDesktopScreenShare(shareId: String) {
+        if (desktopScreenShareId != shareId || desktopScreenShareStopping) return
+        desktopScreenShareStopping = true
+        sendControl("desktop_screen_share.stop", shareId)
+        notificationManager().cancel(DESKTOP_SHARE_NOTIFICATION_ID)
+    }
+
     private fun showShareRequestNotification(request: ScreenShareRequest) {
         val intent = Intent(this, MainActivity::class.java).apply {
             action = ACTION_OPEN_SCREEN_SHARE
@@ -223,8 +324,9 @@ internal class JmdroidConnectionService : Service() {
         val notification = NotificationCompat.Builder(this, SHARE_CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_stat_jmd)
             .setContentTitle("O JMD solicitou compartilhar a tela")
-            .setContentText("Toque para revisar e autorizar a captura no Android.")
+            .setContentText("Toque em Aceitar para abrir a autorização de captura do Android.")
             .setContentIntent(pendingIntent)
+            .addAction(R.drawable.ic_stat_jmd, "Aceitar", pendingIntent)
             .setAutoCancel(true)
             .setCategory(NotificationCompat.CATEGORY_EVENT)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
@@ -469,6 +571,9 @@ internal class JmdroidConnectionService : Service() {
         const val ACTION_SCREEN_SHARE_DENIED = "com.jmd.android.action.SCREEN_SHARE_DENIED"
         const val ACTION_SCREEN_SHARE_CANCEL_PROMPT = "com.jmd.android.action.SCREEN_SHARE_CANCEL_PROMPT"
         const val ACTION_STOP_SHARE = "com.jmd.android.action.STOP_SHARE"
+        const val ACTION_DESKTOP_SCREEN_SHARE_REQUEST = "com.jmd.android.action.DESKTOP_SCREEN_SHARE_REQUEST"
+        const val ACTION_DESKTOP_SCREEN_SHARE_ENDED = "com.jmd.android.action.DESKTOP_SCREEN_SHARE_ENDED"
+        const val ACTION_OPEN_DESKTOP_SCREEN_VIEWER = "com.jmd.android.action.OPEN_DESKTOP_SCREEN_VIEWER"
         const val EXTRA_CONNECTED = "connected"
         const val EXTRA_MESSAGE = "message"
         const val EXTRA_SHARE_ID = "shareId"
@@ -478,11 +583,34 @@ internal class JmdroidConnectionService : Service() {
         const val EXTRA_QUALITY = "quality"
         const val EXTRA_PROJECTION_RESULT = "projectionResult"
         const val EXTRA_PROJECTION_DATA = "projectionData"
+        const val ACTION_VIEWER_READY = "com.jmd.android.action.DESKTOP_VIEWER_READY"
+        const val ACTION_VIEWER_STOP = "com.jmd.android.action.DESKTOP_VIEWER_STOP"
+        private const val EXTRA_VIEWER_WIDTH = "viewerWidth"
+        private const val EXTRA_VIEWER_HEIGHT = "viewerHeight"
         private const val SERVICE_CHANNEL_ID = "jmdroid_connection_service"
         private const val SHARE_CHANNEL_ID = "jmdroid_screen_share_request"
         private const val SERVICE_NOTIFICATION_ID = 4301
         private const val SHARE_NOTIFICATION_ID = 4302
+        private const val DESKTOP_SHARE_NOTIFICATION_ID = 4303
+        private const val DESKTOP_FRAME_MAX_BYTES = 512 * 1024
         private const val RECONNECT_DELAY_MS = 5_000L
+
+        @Volatile private var desktopFrameListener: ((ByteArray) -> Unit)? = null
+
+        fun setDesktopFrameListener(listener: ((ByteArray) -> Unit)?) {
+            desktopFrameListener = listener
+        }
+
+        fun sendDesktopViewerReady(context: Context, shareId: String, width: Int, height: Int) {
+            context.startService(Intent(context, JmdroidConnectionService::class.java)
+                .setAction(ACTION_VIEWER_READY).putExtra(EXTRA_SHARE_ID, shareId)
+                .putExtra(EXTRA_VIEWER_WIDTH, width).putExtra(EXTRA_VIEWER_HEIGHT, height))
+        }
+
+        fun stopDesktopScreenShare(context: Context, shareId: String) {
+            context.startService(Intent(context, JmdroidConnectionService::class.java)
+                .setAction(ACTION_VIEWER_STOP).putExtra(EXTRA_SHARE_ID, shareId))
+        }
 
         fun connect(context: Context, reconnect: Boolean = false) {
             val intent = Intent(context, JmdroidConnectionService::class.java)
