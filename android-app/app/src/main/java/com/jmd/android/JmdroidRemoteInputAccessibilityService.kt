@@ -9,7 +9,6 @@ import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
-import android.text.TextUtils
 import android.view.accessibility.AccessibilityEvent
 import java.util.ArrayDeque
 
@@ -79,10 +78,12 @@ internal class JmdroidRemoteInputAccessibilityService : AccessibilityService() {
             val expected = ComponentName(context, JmdroidRemoteInputAccessibilityService::class.java).flattenToString()
             val enabled = Settings.Secure.getString(context.contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES)
             if (enabled.isNullOrBlank()) return false
-            val splitter = TextUtils.SimpleStringSplitter(':')
-            splitter.setString(enabled)
-            while (splitter.hasNext()) if (splitter.next().equals(expected, ignoreCase = true)) return true
-            return false
+            val expectedComponent = ComponentName.unflattenFromString(expected) ?: return false
+            return enabled.split(':').any { entry ->
+                val component = ComponentName.unflattenFromString(entry.trim()) ?: return@any false
+                component.packageName.equals(expectedComponent.packageName, ignoreCase = true) &&
+                    component.className.equals(expectedComponent.className, ignoreCase = true)
+            }
         }
 
         private val mainHandler = Handler(Looper.getMainLooper())

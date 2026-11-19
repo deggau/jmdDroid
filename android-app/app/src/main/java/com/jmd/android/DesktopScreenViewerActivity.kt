@@ -225,10 +225,11 @@ class DesktopScreenViewerActivity : Activity() {
                     runOnUiThread {
                         if (!isFinishing && shareId != null) {
                             val old = currentBitmap
+                            val keepViewport = old != null && old.width == bitmap.width && old.height == bitmap.height
                             currentBitmap = bitmap
                             screenImage.setImageBitmap(bitmap)
                             statusText.visibility = View.GONE
-                            updateImageMatrix(resetZoom = false)
+                            if (!keepViewport) updateImageMatrix(resetZoom = false)
                             old?.recycle()
                         } else bitmap.recycle()
                     }

@@ -304,6 +304,9 @@ class MainActivity : Activity() {
             if (request != null) {
                 if (resultCode == RESULT_OK && data != null) {
                     JmdroidConnectionService.grantProjection(this, request.shareId, resultCode, data)
+                    if (Build.VERSION.SDK_INT >= 24 && !JmdroidRemoteInputAccessibilityService.isEnabled(this)) {
+                        showRemoteInputAccessibilitySettings()
+                    }
                 } else {
                     JmdroidConnectionService.denyProjection(this, request.shareId)
                 }
@@ -1333,7 +1336,7 @@ class MainActivity : Activity() {
             .setMessage(if (enabled) {
                 "Acessibilidade está habilitada. Durante o compartilhamento da tela, o JMD poderá enviar toques e rolagens para este celular. Você pode desativar o serviço a qualquer momento nas configurações do Android."
             } else {
-                "Para o computador controlar toques e rolagens durante o compartilhamento da tela, habilite Controle remoto do JMDroid nas configurações de Acessibilidade. O Android solicitará sua confirmação."
+                "A captura da tela está ativa, mas o Android ainda não permite reproduzir os cliques e rolagens do computador. Para habilitar esse controle, ative Controle remoto do JMDroid nas configurações de Acessibilidade. O compartilhamento da imagem pode continuar sem isso."
             })
             .setNegativeButton("Fechar", null)
             .setPositiveButton(if (enabled) "Configurações" else "Abrir configurações") { _, _ ->
@@ -1750,7 +1753,8 @@ class MainActivity : Activity() {
                         showBrandedMessage("Pedido enviado ao JMD. Abrindo o visualizador…", 4_000L)
                     } else {
                         connectionStatus.text = if (succeeded) "${command.name} concluído." else "${command.name} falhou."
-                        if (succeeded) showResultDialog(command.name, output)
+                        if (succeeded && output.isNotBlank()) showResultDialog(command.name, output)
+                        else if (succeeded) showBrandedMessage("${command.name} concluído.")
                         else AlertDialog.Builder(this).setTitle("Não foi possível executar")
                             .setMessage(error.ifBlank { "O JMD não conseguiu executar o comando." }).setPositiveButton("OK", null).show()
                     }
