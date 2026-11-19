@@ -52,7 +52,9 @@ internal data class RemoteCommand(
     val available: Boolean,
     val unavailableReason: String?,
     val isWorkflow: Boolean = false,
-    val inputVariables: List<String> = emptyList()
+    val inputVariables: List<String> = emptyList(),
+    val iconDataUrl: String? = null,
+    val voicePhrases: List<String> = emptyList()
 )
 
 internal data class JmdroidTaskChecklistEntry(
@@ -164,7 +166,11 @@ internal class JmdroidApiClient(private val paired: PairedJmd) {
             RemoteCommand(
                 item.getString("id"), item.getString("name"), item.optString("description"),
                 item.optString("shortcut"), item.optBoolean("available"), item.optString("unavailableReason").takeIf { it.isNotBlank() },
-                workflow, variables
+                workflow, variables,
+                item.optString("icon").takeIf { it.startsWith("data:image/png;base64,") },
+                item.optJSONArray("voicePhrases")?.let { phrases ->
+                    (0 until phrases.length()).mapNotNull { phrases.optString(it).takeIf(String::isNotBlank) }
+                }.orEmpty()
             )
         }
     }

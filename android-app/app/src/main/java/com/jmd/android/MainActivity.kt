@@ -11,6 +11,9 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.graphics.Typeface
 import android.graphics.Color
+import android.graphics.BitmapFactory
+import android.graphics.drawable.Drawable
+import android.graphics.drawable.BitmapDrawable
 import android.graphics.drawable.GradientDrawable
 import android.net.Uri
 import android.os.Build
@@ -40,6 +43,13 @@ import java.io.FileOutputStream
 import java.net.HttpURLConnection
 import java.net.URL
 import java.security.MessageDigest
+import java.time.Instant
+import java.time.LocalDateTime
+import java.time.OffsetDateTime
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
+import java.util.Locale
+import android.util.Base64
 import java.util.concurrent.Executors
 import okhttp3.Response
 import okhttp3.WebSocket
@@ -76,6 +86,8 @@ class MainActivity : Activity() {
     private lateinit var tasksContainer: LinearLayout
     private lateinit var taskSearch: EditText
     private lateinit var taskStatusText: TextView
+    private val taskFilterButtons = linkedMapOf<String, Button>()
+    private var taskHistoryFilterButton: Button? = null
     private lateinit var commandsTab: Button
     private lateinit var tasksTab: Button
     private var allCommands: List<RemoteCommand> = emptyList()
@@ -651,38 +663,40 @@ class MainActivity : Activity() {
             setPadding(0, dp(12), 0, 0)
         }
         listOf("Abertas" to "open", "Concluídas" to "completed", "Todas" to "all").forEach { (title, status) ->
-            filters.addView(Button(this@MainActivity).apply {
+            val filterButton = Button(this@MainActivity).apply {
                 text = title
                 textSize = 11f
                 isAllCaps = false
-                setTextColor(textMuted)
-                background = rounded(surface, surface, 9f)
                 setOnClickListener {
                     showingTaskHistory = false
                     taskStatus = status
+                    updateTaskFilterSelection()
                     messageHandler.removeCallbacks(taskHistorySearchRunnable)
                     taskSearch.hint = "Filtrar tarefas"
                     taskSearch.setText("")
                     taskStatusText.visibility = View.VISIBLE
                     loadTasks()
                 }
-            }, LinearLayout.LayoutParams(0, dp(40), 1f).apply { marginEnd = dp(5) })
+            }
+            taskFilterButtons[status] = filterButton
+            filters.addView(filterButton, LinearLayout.LayoutParams(0, dp(40), 1f).apply { marginEnd = dp(5) })
         }
-        filters.addView(Button(this@MainActivity).apply {
+        taskHistoryFilterButton = Button(this@MainActivity).apply {
             text = "Histórico"
             textSize = 11f
             isAllCaps = false
-            setTextColor(accent)
-            background = rounded(surface, surface, 9f)
             setOnClickListener {
                 showingTaskHistory = true
+                updateTaskFilterSelection()
                 taskStatusText.visibility = View.VISIBLE
                 taskSearch.hint = "Buscar no histórico"
                 taskSearch.setText("")
                 loadTaskHistory(0)
             }
-        }, LinearLayout.LayoutParams(0, dp(40), 0.9f))
+        }
+        filters.addView(taskHistoryFilterButton, LinearLayout.LayoutParams(0, dp(40), 0.9f))
         addView(filters)
+        updateTaskFilterSelection()
 
         taskSearch = EditText(this@MainActivity).apply {
             hint = "Filtrar tarefas"
@@ -730,7 +744,7 @@ class MainActivity : Activity() {
                 val tasks = client.getTasks(taskStatus)
                 runOnUiThread {
                     allTasks = tasks
-                    taskStatusText.text = "${tasks.size} tarefa(s)"
+                    taskStatusText.text = "${taskFilterTitle(taskStatus)} · ${tasks.size} tarefa(s)"
                     renderTasks()
                 }
             } catch (error: Exception) {
@@ -739,15 +753,101 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun updateTaskFilterSelection() {
+        taskFilterButtons.forEach { (status, button) ->
+            val selected = !showingTaskHistory && taskStatus == status
+            button.setTextColor(if (selected) ink else textMuted)
+            button.background = rounded(if (selected) accent else surface, if (selected) accent else border, 9f)
+        }
+        taskHistoryFilterButton?.let { button ->
+            button.setTextColor(if (showingTaskHistory) ink else textMuted)
+            button.background = rounded(if (showingTaskHistory) accent else surface, if (showingTaskHistory) accent else border, 9f)
+        }
+    }
+
+    private fun taskFilterTitle(status: String): String = when (status) {
+        "completed" -> "Concluídas"
+        "all" -> "Todas"
+        else -> "Abertas"
+    }
+
+    private fun buildTaskHistoryCard(item: JmdroidTaskHistoryEntry): View {
+        val isPhone = item.source.equals("JMDroid", ignoreCase = true) || !item.sourceDeviceName.isNullOrBlank()
+        val sourceText = if (isPhone) {
+            "CELULAR · ${item.sourceDeviceName?.takeIf { it.isNotBlank() } ?: "JMDroid"}"
+        } else if (item.source.equals("APP", ignoreCase = true)) {
+            "DESKTOP · JMD"
+        } else {
+            item.source.ifBlank { "ORIGEM DESCONHECIDA" }.uppercase(Locale("pt", "BR"))
+        }
+        val sourceColor = if (isPhone) Color.rgb(115, 190, 65) else Color.rgb(89, 154, 224)
+        val sourceTint = if (isPhone) Color.rgb(44, 67, 34) else Color.rgb(34, 52, 72)
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(13), dp(12), dp(13), dp(12))
+            background = rounded(surface, border, 11f)
+
+            val heading = LinearLayout(this@MainActivity).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                addView(label(item.commandName.ifBlank { "Alteração de tarefa" }, textPrimary, 14f,
+                    Typeface.create("sans-serif-medium", Typeface.NORMAL)),
+                    LinearLayout.LayoutParams(0, -2, 1f))
+                addView(TextView(this@MainActivity).apply {
+                    text = sourceText
+                    textSize = 10f
+                    typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+                    setTextColor(sourceColor)
+                    setPadding(dp(8), dp(5), dp(8), dp(5))
+                    background = rounded(sourceTint, sourceTint, 12f)
+                    maxLines = 1
+                    maxWidth = dp(160)
+                    ellipsize = android.text.TextUtils.TruncateAt.END
+                })
+            }
+            addView(heading)
+            addView(label(formatTaskHistoryDate(item.occurredAt), textMuted, 11f).apply {
+                setPadding(0, dp(5), 0, dp(7))
+            })
+            if (item.beforeValue.isNotBlank()) {
+                addView(label("Antes · ${item.beforeValue}", textMuted, 12f).apply {
+                    maxLines = 3
+                    ellipsize = android.text.TextUtils.TruncateAt.END
+                })
+            }
+            if (item.afterValue.isNotBlank()) {
+                addView(label("Depois · ${item.afterValue}", textPrimary, 13f).apply {
+                    setPadding(0, if (item.beforeValue.isNotBlank()) dp(4) else 0, 0, 0)
+                    maxLines = 4
+                    ellipsize = android.text.TextUtils.TruncateAt.END
+                })
+            }
+        }
+    }
+
+    private fun formatTaskHistoryDate(value: String): String {
+        val instant = try {
+            OffsetDateTime.parse(value).toInstant()
+        } catch (_: Exception) {
+            try {
+                Instant.parse(value)
+            } catch (_: Exception) {
+                try {
+                    LocalDateTime.parse(value).atZone(ZoneId.systemDefault()).toInstant()
+                } catch (_: Exception) {
+                    return value
+                }
+            }
+        }
+        return TASK_HISTORY_DATE_FORMAT.format(instant.atZone(ZoneId.systemDefault()))
+    }
+
     private fun renderTasks() {
         if (!::tasksContainer.isInitialized) return
         tasksContainer.removeAllViews()
         if (showingTaskHistory) {
             taskHistoryItems.forEach { item ->
-                val row = label("${item.commandName}\n${item.afterValue}\n${item.occurredAt} · ${item.sourceDeviceName ?: item.source}", textPrimary, 14f)
-                row.setPadding(dp(12), dp(12), dp(12), dp(12))
-                row.background = rounded(surface, border, 10f)
-                tasksContainer.addView(row, marginParams(top = 8))
+                tasksContainer.addView(buildTaskHistoryCard(item), marginParams(top = 8))
             }
             if (taskHistoryItems.size < taskHistoryTotal) tasksContainer.addView(Button(this).apply {
                 text = "Carregar mais histórico"; isAllCaps = false
@@ -813,7 +913,7 @@ class MainActivity : Activity() {
                 runOnUiThread {
                     taskHistoryPage = result.page; taskHistoryTotal = result.totalCount
                     taskHistoryItems = if (page == 0) result.items else taskHistoryItems + result.items
-                    taskStatusText.text = "${result.totalCount} registro(s) no histórico"
+                    taskStatusText.text = "Histórico · ${result.totalCount} registro(s)"
                     renderTasks()
                 }
             } catch (error: Exception) { runOnUiThread { taskStatusText.text = apiErrorMessage(error) } }
@@ -1199,6 +1299,10 @@ class MainActivity : Activity() {
                 showTaskNotificationSettings()
                 true
             }
+            menu.add("Controle remoto de toques").setOnMenuItemClickListener {
+                showRemoteInputAccessibilitySettings()
+                true
+            }
             if (pairedJmd == null) {
                 menu.add("Conectar a um JMD").setOnMenuItemClickListener {
                     startPairingScanner()
@@ -1220,6 +1324,23 @@ class MainActivity : Activity() {
             }
             show()
         }
+    }
+
+    private fun showRemoteInputAccessibilitySettings() {
+        val enabled = JmdroidRemoteInputAccessibilityService.isEnabled(this)
+        AlertDialog.Builder(this)
+            .setTitle("Controle remoto de toques")
+            .setMessage(if (enabled) {
+                "Acessibilidade está habilitada. Durante o compartilhamento da tela, o JMD poderá enviar toques e rolagens para este celular. Você pode desativar o serviço a qualquer momento nas configurações do Android."
+            } else {
+                "Para o computador controlar toques e rolagens durante o compartilhamento da tela, habilite Controle remoto do JMDroid nas configurações de Acessibilidade. O Android solicitará sua confirmação."
+            })
+            .setNegativeButton("Fechar", null)
+            .setPositiveButton(if (enabled) "Configurações" else "Abrir configurações") { _, _ ->
+                try { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }
+                catch (_: Exception) { showBrandedMessage("Não foi possível abrir as configurações de Acessibilidade") }
+            }
+            .show()
     }
 
     private fun disconnectFromJmd() {
@@ -1469,34 +1590,57 @@ class MainActivity : Activity() {
             ))
         }
         commands.forEach { command ->
-                        val item = LinearLayout(this).apply {
-                            orientation = LinearLayout.VERTICAL
-                            setPadding(dp(12), dp(11), dp(12), dp(11))
-                            background = rounded(surface, border, 10f)
-                            addView(label(command.name, textPrimary, 15f, Typeface.create("sans-serif-medium", Typeface.NORMAL)))
-                            if (command.description.isNotBlank()) {
-                                addView(label(command.description, textMuted, 12f).apply { setPadding(0, dp(3), 0, 0) })
-                            }
-                            if (command.shortcut.isNotBlank()) {
-                                addView(label(command.shortcut, accent, 11f).apply { setPadding(0, dp(4), 0, 0) })
-                            }
-                            if (!command.available) {
-                                addView(label(
-                                    command.unavailableReason ?: "A execução será solicitada ao JMD desktop.",
-                                    textMuted,
-                                    11f
-                                ).apply { setPadding(0, dp(5), 0, 0) })
-                            }
-                            isClickable = command.available
-                            isEnabled = command.available
-                            alpha = if (command.available) 1f else 0.55f
-                            if (command.available) setOnClickListener { showCommandInput(command) }
-                        }
-                        commandContainer.addView(item, marginParams(top = 6))
+            val item = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(dp(12), dp(11), dp(12), dp(11))
+                background = rounded(surface, border, 10f)
+                val icon = ImageView(this@MainActivity).apply {
+                    setImageDrawable(commandIcon(command.iconDataUrl))
+                    scaleType = ImageView.ScaleType.FIT_CENTER
+                    background = rounded(card, border, 9f)
+                    setPadding(dp(6), dp(6), dp(6), dp(6))
+                }
+                addView(icon, LinearLayout.LayoutParams(dp(42), dp(42)).apply { marginEnd = dp(12) })
+                val details = LinearLayout(this@MainActivity).apply {
+                    orientation = LinearLayout.VERTICAL
+                    addView(label(command.name, textPrimary, 15f, Typeface.create("sans-serif-medium", Typeface.NORMAL)))
+                    if (command.description.isNotBlank()) {
+                        addView(label(command.description, textMuted, 12f).apply { setPadding(0, dp(3), 0, 0) })
+                    }
+                    if (command.shortcut.isNotBlank()) {
+                        addView(label(command.shortcut, accent, 11f).apply { setPadding(0, dp(4), 0, 0) })
+                    }
+                    if (command.voicePhrases.isNotEmpty()) {
+                        addView(label("Voz: ${command.voicePhrases.joinToString(" · ")}", textMuted, 11f).apply { setPadding(0, dp(4), 0, 0) })
+                    }
+                    if (!command.available) {
+                        addView(label(command.unavailableReason ?: "A execução será solicitada ao JMD desktop.", textMuted, 11f)
+                            .apply { setPadding(0, dp(5), 0, 0) })
+                    }
+                }
+                addView(details, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+                isClickable = command.available
+                isEnabled = command.available
+                alpha = if (command.available) 1f else 0.55f
+                if (command.available) setOnClickListener { showCommandInput(command) }
+            }
+            commandContainer.addView(item, marginParams(top = 6))
         }
         if (pairedJmd != null && allCommands.isNotEmpty()) {
             connectionStatus.text = if (normalized.isBlank()) "${commands.size} comando(s) disponível(is)." else "${commands.size} resultado(s) para ‘$query’."
         }
+    }
+
+    private fun commandIcon(dataUrl: String?): Drawable {
+        val prefix = "data:image/png;base64,"
+        if (dataUrl != null && dataUrl.startsWith(prefix) && dataUrl.length <= 400_000) {
+            try {
+                val bytes = Base64.decode(dataUrl.substring(prefix.length), Base64.DEFAULT)
+                if (bytes.size <= 256 * 1024) BitmapFactory.decodeByteArray(bytes, 0, bytes.size)?.let { return BitmapDrawable(resources, it) }
+            } catch (_: Exception) { }
+        }
+        return getDrawable(R.mipmap.ic_launcher)!!
     }
 
     private fun showCommandInput(command: RemoteCommand) {
@@ -1519,7 +1663,7 @@ class MainActivity : Activity() {
             form.addView(this)
         } else null
         if (isScreenShare) {
-            form.addView(label("O Android solicitará autorização do sistema antes de compartilhar a tela.", textMuted, 13f))
+            form.addView(label("O Android solicitará autorização do sistema antes de compartilhar a tela. Para receber toques e rolagens do computador, habilite Controle remoto de toques no menu secundário.", textMuted, 13f))
         } else if (isDesktopScreenShare) {
             form.addView(label("O JMD enviará a tela principal do computador para este celular. A visualização pode ser interrompida a qualquer momento.", textMuted, 13f))
         } else if (command.isWorkflow) {
@@ -1880,6 +2024,8 @@ class MainActivity : Activity() {
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
 
     private companion object {
+        val TASK_HISTORY_DATE_FORMAT: DateTimeFormatter =
+            DateTimeFormatter.ofPattern("dd/MM/yyyy 'às' HH:mm", Locale("pt", "BR"))
         const val LATEST_RELEASE_API = "https://api.github.com/repos/deggau/jmdDroid/releases/latest"
         const val RELEASE_DOWNLOAD_PREFIX = "https://github.com/deggau/jmdDroid/releases/download/"
         const val APK_ASSET_NAME = "jmdroid.apk"

@@ -55,6 +55,8 @@ internal class JmdroidConnectionService : Service() {
     private var captureHandler: Handler? = null
     private var lastFrameNanos = 0L
     private val isCapturing = AtomicBoolean(false)
+    @Volatile private var screenWidth = 0
+    @Volatile private var screenHeight = 0
     private val reconnectRunnable = Runnable { connectSocket() }
     private var stoppingService = false
     private val projectionCallback = object : MediaProjection.Callback() {
@@ -144,6 +146,7 @@ internal class JmdroidConnectionService : Service() {
                         "session.ready" -> broadcastState(true, "Sessão segura ativa no JMD.")
                         "screen_share.start" -> receiveShareRequest(message)
                         "screen_share.stop" -> receiveShareStop(message.optString("shareId"))
+                        "screen_share.input" -> receiveScreenShareInput(message)
                         "desktop_screen_share.start" -> receiveDesktopScreenShareRequest(message)
                         "desktop_screen_share.stop" -> receiveDesktopScreenShareStop(message.optString("shareId"))
                         "desktop_screen_share.stopped" -> finishDesktopScreenShare(message.optString("shareId"))
@@ -228,6 +231,58 @@ internal class JmdroidConnectionService : Service() {
         if (shareRequest?.shareId != shareId) return
         notificationManager().cancel(SHARE_NOTIFICATION_ID)
         stopScreenShare(sendStopped = true)
+    }
+
+    private fun receiveScreenShareInput(message: JSONObject) {
+        val shareId = message.optString("shareId")
+        if (shareId.isBlank() || shareRequest?.shareId != shareId || !isCapturing.get()) return
+        val x = message.optDouble("x", Double.NaN)
+        val y = message.optDouble("y", Double.NaN)
+        if (!x.isFinite() || !y.isFinite() || x !in 0.0..1.0 || y !in 0.0..1.0) return
+        if (!JmdroidRemoteInputAccessibilityService.isEnabled(this)) {
+            sendControl("screen_share.input_error", shareId, "Ative o controle remoto nas configurações de Acessibilidade do Android.")
+            return
+        }
+        val width = screenWidth
+        val height = screenHeight
+        if (width <= 0 || height <= 0) return
+        val pointX = (x * (width - 1)).toFloat()
+        val pointY = (y * (height - 1)).toFloat()
+        val onRejected = {
+            if (shareRequest?.shareId == shareId && isCapturing.get()) {
+                sendControl("screen_share.input_error", shareId, "Não foi possível executar o gesto. Verifique a Acessibilidade do Android.")
+            }
+        }
+        when (message.optString("action")) {
+            "tap" -> JmdroidRemoteInputAccessibilityService.performTap(pointX, pointY, onRejected)
+            "scroll" -> {
+                val dx = message.optDouble("deltaX", 0.0)
+                val dy = message.optDouble("deltaY", 0.0)
+                if (!dx.isFinite() || !dy.isFinite() || (dx == 0.0 && dy == 0.0)) return
+                val horizontal = kotlin.math.abs(dx) > kotlin.math.abs(dy)
+                val dominant = if (horizontal) dx else dy
+                val distance = (resources.displayMetrics.density * 240f * (kotlin.math.abs(dominant) / 120.0).coerceAtMost(2.5)).toFloat()
+                    .coerceAtLeast(resources.displayMetrics.density * 80f)
+                var startX = pointX; var startY = pointY; var endX = pointX; var endY = pointY
+                if (horizontal) {
+                    val d = minOf(distance, width - 1f)
+                    val direction = if (dx > 0) -1f else 1f
+                    val minStart = if (direction < 0) d else 0f
+                    val maxStart = if (direction < 0) width - 1f else width - 1f - d
+                    startX = (pointX - direction * d / 2f).coerceIn(minStart, maxStart)
+                    endX = startX + direction * d
+                } else {
+                    val d = minOf(distance, height - 1f)
+                    val direction = if (dy > 0) 1f else -1f
+                    val minStart = if (direction < 0) d else 0f
+                    val maxStart = if (direction < 0) height - 1f else height - 1f - d
+                    startY = (pointY - direction * d / 2f).coerceIn(minStart, maxStart)
+                    endY = startY + direction * d
+                }
+                JmdroidRemoteInputAccessibilityService.performSwipe(startX, startY, endX, endY, onRejected)
+            }
+            else -> return
+        }
     }
 
     private fun receiveDesktopScreenShareRequest(message: JSONObject) {
@@ -349,6 +404,8 @@ internal class JmdroidConnectionService : Service() {
             val metrics = resources.displayMetrics
             val captureWidth = metrics.widthPixels.coerceAtLeast(1)
             val captureHeight = metrics.heightPixels.coerceAtLeast(1)
+            screenWidth = captureWidth
+            screenHeight = captureHeight
             val reader = ImageReader.newInstance(captureWidth, captureHeight, PixelFormat.RGBA_8888, 2)
             imageReader = reader
             val thread = HandlerThread("jmd-screen-capture").apply { start() }
@@ -481,6 +538,8 @@ internal class JmdroidConnectionService : Service() {
         val request = shareRequest
         shareRequest = null
         isCapturing.set(false)
+        screenWidth = 0
+        screenHeight = 0
         if (sendStopped && request != null) sendControl("screen_share.stopped", request.shareId)
         try { imageReader?.setOnImageAvailableListener(null, null) } catch (_: Exception) { }
         try { virtualDisplay?.release() } catch (_: Exception) { }

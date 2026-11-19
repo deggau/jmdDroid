@@ -8,9 +8,13 @@ import android.content.IntentFilter
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Color
+import android.graphics.Matrix
 import android.os.Build
 import android.os.Bundle
+import android.view.GestureDetector
 import android.view.Gravity
+import android.view.MotionEvent
+import android.view.ScaleGestureDetector
 import android.view.View
 import android.view.ViewTreeObserver
 import android.widget.Button
@@ -28,7 +32,9 @@ class DesktopScreenViewerActivity : Activity() {
     private var shareId: String? = null
     private var lastReadyWidth = 0
     private var lastReadyHeight = 0
+    private var zoomFactor = 1f
     private var currentBitmap: Bitmap? = null
+    private val imageMatrix = Matrix()
     private val pendingFrame = AtomicReference<ByteArray?>(null)
     private val decodingFrame = AtomicBoolean(false)
     private val decoder = Executors.newSingleThreadExecutor()
@@ -40,6 +46,7 @@ class DesktopScreenViewerActivity : Activity() {
             lastReadyWidth = width
             lastReadyHeight = height
             JmdroidConnectionService.sendDesktopViewerReady(this, id, width, height)
+            updateImageMatrix(resetZoom = false)
         }
     }
     private val receiver = object : BroadcastReceiver() {
@@ -52,6 +59,41 @@ class DesktopScreenViewerActivity : Activity() {
             clearFrame()
             finish()
         }
+    }
+    private val scaleDetector by lazy {
+        ScaleGestureDetector(this, object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
+            override fun onScale(detector: ScaleGestureDetector): Boolean {
+                if (currentBitmap == null) return false
+                val nextZoom = (zoomFactor * detector.scaleFactor).coerceIn(1f, MAX_ZOOM)
+                val appliedScale = nextZoom / zoomFactor
+                zoomFactor = nextZoom
+                if (zoomFactor <= 1.001f) {
+                    zoomFactor = 1f
+                    updateImageMatrix(resetZoom = true)
+                } else {
+                    imageMatrix.postScale(appliedScale, appliedScale, detector.focusX, detector.focusY)
+                    constrainImageMatrix()
+                }
+                screenImage.imageMatrix = imageMatrix
+                return true
+            }
+        })
+    }
+    private val gestureDetector by lazy {
+        GestureDetector(this, object : GestureDetector.SimpleOnGestureListener() {
+            override fun onScroll(e1: MotionEvent?, e2: MotionEvent, distanceX: Float, distanceY: Float): Boolean {
+                if (currentBitmap == null || zoomFactor <= 1f) return false
+                imageMatrix.postTranslate(-distanceX, -distanceY)
+                constrainImageMatrix()
+                screenImage.imageMatrix = imageMatrix
+                return true
+            }
+
+            override fun onDoubleTap(e: MotionEvent): Boolean {
+                resetZoom()
+                return true
+            }
+        })
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -125,19 +167,31 @@ class DesktopScreenViewerActivity : Activity() {
             typeface = android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.NORMAL)
         }
         header.addView(title, LinearLayout.LayoutParams(0, -2, 1f))
+        header.addView(zoomControl("−", "Diminuir zoom") { zoomBy(1f / ZOOM_STEP) })
+        header.addView(zoomControl("+", "Aumentar zoom") { zoomBy(ZOOM_STEP) })
+        header.addView(zoomControl("Fit", "Ajustar à tela") { resetZoom() }, LinearLayout.LayoutParams(dp(42), dp(38)))
         header.addView(Button(this).apply {
             text = "Parar"
             isAllCaps = false
             setTextColor(Color.rgb(180, 243, 106))
             setOnClickListener { stopShareAndClose() }
-        })
+        }, LinearLayout.LayoutParams(-2, dp(42)))
         root.addView(header)
 
         screenImage = ImageView(this).apply {
             setBackgroundColor(Color.BLACK)
-            scaleType = ImageView.ScaleType.FIT_CENTER
+            scaleType = ImageView.ScaleType.MATRIX
             contentDescription = "Tela compartilhada do computador"
             adjustViewBounds = false
+            setOnTouchListener { _, event ->
+                scaleDetector.onTouchEvent(event)
+                gestureDetector.onTouchEvent(event)
+                if (event.actionMasked == MotionEvent.ACTION_UP || event.actionMasked == MotionEvent.ACTION_CANCEL) {
+                    constrainImageMatrix()
+                    screenImage.imageMatrix = imageMatrix
+                }
+                true
+            }
         }
         val imageArea = FrameLayout(this).apply {
             addView(screenImage, FrameLayout.LayoutParams(-1, -1))
@@ -147,6 +201,8 @@ class DesktopScreenViewerActivity : Activity() {
                 setTextColor(Color.rgb(220, 222, 228))
                 gravity = Gravity.CENTER
                 setPadding(dp(24), dp(12), dp(24), dp(12))
+                isClickable = false
+                isFocusable = false
             }
             addView(statusText, FrameLayout.LayoutParams(-1, -2, Gravity.CENTER))
         }
@@ -172,6 +228,7 @@ class DesktopScreenViewerActivity : Activity() {
                             currentBitmap = bitmap
                             screenImage.setImageBitmap(bitmap)
                             statusText.visibility = View.GONE
+                            updateImageMatrix(resetZoom = false)
                             old?.recycle()
                         } else bitmap.recycle()
                     }
@@ -193,10 +250,97 @@ class DesktopScreenViewerActivity : Activity() {
 
     private fun clearFrame() {
         screenImage.setImageDrawable(null)
+        imageMatrix.reset()
+        screenImage.imageMatrix = imageMatrix
+        zoomFactor = 1f
         currentBitmap?.recycle()
         currentBitmap = null
         pendingFrame.set(null)
     }
 
+    private fun zoomControl(
+        symbol: String,
+        description: String,
+        params: LinearLayout.LayoutParams = LinearLayout.LayoutParams(dp(36), dp(38)).apply { marginEnd = dp(3) },
+        action: () -> Unit
+    ): TextView = TextView(this).apply {
+        text = symbol
+        contentDescription = description
+        textSize = if (symbol == "Fit") 12f else 22f
+        setTextColor(Color.WHITE)
+        gravity = Gravity.CENTER
+        isClickable = true
+        isFocusable = true
+        setOnClickListener { action() }
+        layoutParams = params
+    }
+
+    private fun zoomBy(factor: Float) {
+        if (currentBitmap == null || screenImage.width == 0 || screenImage.height == 0) return
+        val nextZoom = (zoomFactor * factor).coerceIn(1f, MAX_ZOOM)
+        if (nextZoom <= 1.001f) {
+            resetZoom()
+            return
+        }
+        val scale = nextZoom / zoomFactor
+        zoomFactor = nextZoom
+        imageMatrix.postScale(scale, scale, screenImage.width / 2f, screenImage.height / 2f)
+        constrainImageMatrix()
+        screenImage.imageMatrix = imageMatrix
+    }
+
+    private fun resetZoom() {
+        zoomFactor = 1f
+        updateImageMatrix(resetZoom = true)
+    }
+
+    private fun updateImageMatrix(resetZoom: Boolean) {
+        val bitmap = currentBitmap ?: return
+        val viewWidth = screenImage.width
+        val viewHeight = screenImage.height
+        if (viewWidth <= 0 || viewHeight <= 0) return
+        if (resetZoom) zoomFactor = 1f
+        val baseScale = minOf(viewWidth.toFloat() / bitmap.width, viewHeight.toFloat() / bitmap.height)
+        val drawnWidth = bitmap.width * baseScale
+        val drawnHeight = bitmap.height * baseScale
+        imageMatrix.reset()
+        imageMatrix.setScale(baseScale, baseScale)
+        imageMatrix.postTranslate((viewWidth - drawnWidth) / 2f, (viewHeight - drawnHeight) / 2f)
+        if (zoomFactor > 1f) imageMatrix.postScale(zoomFactor, zoomFactor, viewWidth / 2f, viewHeight / 2f)
+        constrainImageMatrix()
+        screenImage.imageMatrix = imageMatrix
+    }
+
+    private fun constrainImageMatrix() {
+        val bitmap = currentBitmap ?: return
+        val viewWidth = screenImage.width.toFloat()
+        val viewHeight = screenImage.height.toFloat()
+        if (viewWidth <= 0f || viewHeight <= 0f) return
+        val values = FloatArray(9)
+        imageMatrix.getValues(values)
+        val drawnWidth = bitmap.width * values[Matrix.MSCALE_X]
+        val drawnHeight = bitmap.height * values[Matrix.MSCALE_Y]
+        val translateX = values[Matrix.MTRANS_X]
+        val translateY = values[Matrix.MTRANS_Y]
+        val correctionX = when {
+            drawnWidth <= viewWidth -> (viewWidth - drawnWidth) / 2f - translateX
+            translateX > 0f -> -translateX
+            translateX + drawnWidth < viewWidth -> viewWidth - (translateX + drawnWidth)
+            else -> 0f
+        }
+        val correctionY = when {
+            drawnHeight <= viewHeight -> (viewHeight - drawnHeight) / 2f - translateY
+            translateY > 0f -> -translateY
+            translateY + drawnHeight < viewHeight -> viewHeight - (translateY + drawnHeight)
+            else -> 0f
+        }
+        imageMatrix.postTranslate(correctionX, correctionY)
+    }
+
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
+
+    private companion object {
+        const val ZOOM_STEP = 1.25f
+        const val MAX_ZOOM = 5f
+    }
 }
