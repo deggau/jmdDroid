@@ -31,6 +31,7 @@ import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.max
+import kotlin.math.roundToInt
 
 internal data class ScreenShareRequest(
     val shareId: String,
@@ -256,8 +257,14 @@ internal class JmdroidConnectionService : Service() {
         val width = screenWidth
         val height = screenHeight
         if (width <= 0 || height <= 0) return
-        val pointX = (x * (width - 1)).toFloat()
-        val pointY = (y * (height - 1)).toFloat()
+        // The desktop sends the dimensions of the exact JPEG it displayed. Map its
+        // rounded frame pixels to the physical MediaProjection surface, not dp values.
+        val frameWidth = if (message.has("frameWidth")) message.optInt("frameWidth", 0) else width
+        val frameHeight = if (message.has("frameHeight")) message.optInt("frameHeight", 0) else height
+        if (frameWidth !in 1..2400 || frameHeight !in 1..2400) return
+        val point = mapFramePoint(x, y, frameWidth, frameHeight, width, height) ?: return
+        val pointX = point.first
+        val pointY = point.second
         val onRejected = {
             if (shareRequest?.shareId == shareId && isCapturing.get()) {
                 sendControl("screen_share.input_error", shareId, "Não foi possível executar o gesto. Verifique a Acessibilidade do Android.")
@@ -265,34 +272,60 @@ internal class JmdroidConnectionService : Service() {
         }
         when (message.optString("action")) {
             "tap" -> JmdroidRemoteInputAccessibilityService.performTap(pointX, pointY, onRejected)
+            "drag" -> {
+                val endX = message.optDouble("endX", Double.NaN)
+                val endY = message.optDouble("endY", Double.NaN)
+                if (!endX.isFinite() || !endY.isFinite() || endX !in 0.0..1.0 || endY !in 0.0..1.0) return
+                val end = mapFramePoint(endX, endY, frameWidth, frameHeight, width, height) ?: return
+                val duration = message.optInt("durationMilliseconds", 420).coerceIn(50, 5000)
+                JmdroidRemoteInputAccessibilityService.performSwipe(pointX, pointY, end.first, end.second, duration.toLong(), onRejected)
+            }
             "scroll" -> {
                 val dx = message.optDouble("deltaX", 0.0)
                 val dy = message.optDouble("deltaY", 0.0)
                 if (!dx.isFinite() || !dy.isFinite() || (dx == 0.0 && dy == 0.0)) return
                 val horizontal = kotlin.math.abs(dx) > kotlin.math.abs(dy)
                 val dominant = if (horizontal) dx else dy
-                val distance = (resources.displayMetrics.density * 240f * (kotlin.math.abs(dominant) / 120.0).coerceAtMost(2.5)).toFloat()
-                    .coerceAtLeast(resources.displayMetrics.density * 80f)
-                var startX = pointX; var startY = pointY; var endX = pointX; var endY = pointY
+                val axisSize = if (horizontal) width.toFloat() else height.toFloat()
+                if (axisSize <= 1f) return
+                val wheelSteps = (kotlin.math.abs(dominant) / 120.0).coerceAtMost(5.0)
+                val density = resources.displayMetrics.density
+                val distance = (density * 90f * wheelSteps.toFloat()).coerceAtMost((axisSize - 1f) * 0.45f).coerceAtLeast(1f)
+                val direction = if (horizontal) { if (dx > 0) -1f else 1f } else { if (dy > 0) 1f else -1f }
+                var startX = pointX
+                var startY = pointY
+                var endX = pointX
+                var endY = pointY
                 if (horizontal) {
-                    val d = minOf(distance, width - 1f)
-                    val direction = if (dx > 0) -1f else 1f
-                    val minStart = if (direction < 0) d else 0f
-                    val maxStart = if (direction < 0) width - 1f else width - 1f - d
-                    startX = (pointX - direction * d / 2f).coerceIn(minStart, maxStart)
-                    endX = startX + direction * d
+                    startX = if (direction > 0) (pointX - distance / 2f).coerceIn(0f, width - 1f - distance)
+                    else (pointX + distance / 2f).coerceIn(distance, width - 1f)
+                    endX = startX + direction * distance
                 } else {
-                    val d = minOf(distance, height - 1f)
-                    val direction = if (dy > 0) 1f else -1f
-                    val minStart = if (direction < 0) d else 0f
-                    val maxStart = if (direction < 0) height - 1f else height - 1f - d
-                    startY = (pointY - direction * d / 2f).coerceIn(minStart, maxStart)
-                    endY = startY + direction * d
+                    startY = if (direction > 0) (pointY - distance / 2f).coerceIn(0f, height - 1f - distance)
+                    else (pointY + distance / 2f).coerceIn(distance, height - 1f)
+                    endY = startY + direction * distance
                 }
-                JmdroidRemoteInputAccessibilityService.performSwipe(startX, startY, endX, endY, onRejected)
+                val duration = (150.0 + (wheelSteps - 1.0).coerceAtLeast(0.0) * 70.0).toLong().coerceIn(120L, 500L)
+                JmdroidRemoteInputAccessibilityService.performSwipe(startX, startY, endX, endY, duration, onRejected)
             }
             else -> return
         }
+    }
+
+    private fun mapFramePoint(
+        x: Double,
+        y: Double,
+        frameWidth: Int,
+        frameHeight: Int,
+        screenWidth: Int,
+        screenHeight: Int
+    ): Pair<Float, Float>? {
+        if (frameWidth <= 0 || frameHeight <= 0 || screenWidth <= 0 || screenHeight <= 0) return null
+        val frameX = (x * (frameWidth - 1)).roundToInt()
+        val frameY = (y * (frameHeight - 1)).roundToInt()
+        val screenX = if (frameWidth == 1) 0f else frameX.toFloat() * (screenWidth - 1f) / (frameWidth - 1f)
+        val screenY = if (frameHeight == 1) 0f else frameY.toFloat() * (screenHeight - 1f) / (frameHeight - 1f)
+        return screenX.coerceIn(0f, screenWidth - 1f) to screenY.coerceIn(0f, screenHeight - 1f)
     }
 
     private fun receiveDesktopScreenShareRequest(message: JSONObject) {
@@ -462,6 +495,10 @@ internal class JmdroidConnectionService : Service() {
         val image = try { source.acquireLatestImage() } catch (_: Exception) { null } ?: return
         image.use { frame ->
             if (!isCapturing.get() || shareRequest?.shareId != request.shareId) return
+            // ImageReader reflects the actual captured content rectangle and any
+            // projection resize; input coordinates are mapped back to these pixels.
+            screenWidth = frame.width
+            screenHeight = frame.height
             val now = SystemClock.elapsedRealtimeNanos()
             val interval = 1_000_000_000L / request.maxFps
             if (now - lastFrameNanos < interval) return

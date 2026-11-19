@@ -101,9 +101,16 @@ internal class JmdroidRemoteInputAccessibilityService : AccessibilityService() {
             perform(path, 80L, onRejected)
         }
 
-        fun performSwipe(startX: Float, startY: Float, endX: Float, endY: Float, onRejected: () -> Unit) {
+        fun performSwipe(
+            startX: Float,
+            startY: Float,
+            endX: Float,
+            endY: Float,
+            durationMilliseconds: Long = 250L,
+            onRejected: () -> Unit
+        ) {
             val path = Path().apply { moveTo(startX, startY); lineTo(endX, endY) }
-            perform(path, 250L, onRejected)
+            perform(path, durationMilliseconds.coerceIn(50L, 5000L), onRejected)
         }
     }
 }

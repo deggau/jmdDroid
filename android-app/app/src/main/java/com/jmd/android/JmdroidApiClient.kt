@@ -43,7 +43,13 @@ internal data class PairingQr(
     val pairingSecret: String
 )
 
-internal data class PairedJmd(val baseUrl: String, val certificateSha256: String, val deviceId: String, val accessToken: String)
+internal data class PairedJmd(
+    val baseUrl: String,
+    val certificateSha256: String,
+    val deviceId: String,
+    val accessToken: String,
+    val computerName: String? = null
+)
 internal data class RemoteCommand(
     val id: String,
     val name: String,
@@ -429,7 +435,14 @@ internal class JmdroidApiClient(private val paired: PairedJmd) {
                 Thread.sleep(accepted.optLong("pollAfterMs", 1500).coerceIn(500, 5000))
                 val state = pairingRequest(qr, sslContext, "GET", "/api/v1/pairing/requests/${java.net.URLEncoder.encode(requestId, "UTF-8")}", null)
                 when (state.optString("state")) {
-                    "approved" -> return PairedJmd(qr.baseUrl, qr.certificateSha256, state.getString("deviceId"), state.getString("accessToken"))
+                    "approved" -> return PairedJmd(
+                        qr.baseUrl,
+                        qr.certificateSha256,
+                        state.getString("deviceId"),
+                        state.getString("accessToken"),
+                        state.optString("computerName").takeIf(String::isNotBlank)
+                            ?: accepted.optString("computerName").takeIf(String::isNotBlank)
+                    )
                     "denied" -> throw IllegalStateException("O pedido de pareamento foi negado no JMD.")
                     "expired" -> throw IllegalStateException("O QR code expirou. Gere outro no JMD desktop.")
                     "pending" -> Unit

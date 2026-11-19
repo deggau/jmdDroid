@@ -85,10 +85,12 @@ internal class JmdroidCredentialStore(context: Context) {
         .put("certificateSha256", paired.certificateSha256)
         .put("deviceId", paired.deviceId)
         .put("accessToken", paired.accessToken)
+        .put("computerName", paired.computerName)
 
     private fun jsonToPaired(json: JSONObject) = PairedJmd(
         json.getString("baseUrl"), json.getString("certificateSha256"),
-        json.getString("deviceId"), json.getString("accessToken")
+        json.getString("deviceId"), json.getString("accessToken"),
+        json.optString("computerName").takeIf(String::isNotBlank)
     )
 
     private fun id(paired: PairedJmd) = "${paired.baseUrl.trimEnd('/')}|${paired.certificateSha256.lowercase()}"

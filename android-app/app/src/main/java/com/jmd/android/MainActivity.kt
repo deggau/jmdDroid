@@ -1426,9 +1426,12 @@ class MainActivity : Activity() {
 
     private fun computerId(paired: PairedJmd) = "${paired.baseUrl.trimEnd('/')}|${paired.certificateSha256.lowercase()}"
 
-    private fun computerName(paired: PairedJmd): String = runCatching {
+    private fun computerAddress(paired: PairedJmd): String = runCatching {
         java.net.URL(paired.baseUrl).host.ifBlank { paired.baseUrl }
     }.getOrDefault(paired.baseUrl)
+
+    private fun computerName(paired: PairedJmd): String = paired.computerName?.takeIf(String::isNotBlank)
+        ?: computerAddress(paired)
 
     private fun renderComputerList() {
         if (!::computerList.isInitialized || !::credentialStore.isInitialized) return
@@ -1457,11 +1460,23 @@ class MainActivity : Activity() {
                 null -> Color.rgb(245, 166, 35)
             }
             row.addView(View(this).apply { background = rounded(dotColor, dotColor, 8f) }, LinearLayout.LayoutParams(dp(9), dp(9)))
-            row.addView(label(computerName(computer), textPrimary, 14f, Typeface.create("sans-serif-medium", Typeface.NORMAL)).apply {
-                maxLines = 1
-                ellipsize = android.text.TextUtils.TruncateAt.END
+            val computerLabel = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
                 setPadding(dp(10), 0, dp(8), 0)
-            }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+                addView(label(computerName(computer), textPrimary, 14f, Typeface.create("sans-serif-medium", Typeface.NORMAL)).apply {
+                    maxLines = 1
+                    ellipsize = android.text.TextUtils.TruncateAt.END
+                })
+                val address = computerAddress(computer)
+                if (address != computerName(computer)) {
+                    addView(label(address, textMuted, 11f).apply {
+                        maxLines = 1
+                        ellipsize = android.text.TextUtils.TruncateAt.END
+                        setPadding(0, dp(2), 0, 0)
+                    })
+                }
+            }
+            row.addView(computerLabel, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
             row.addView(label(when (onlineState) { true -> "Online"; false -> "Offline"; null -> "Verificando" }, if (onlineState == true) dotColor else textMuted, 12f))
             if (selected) row.addView(label("  ATIVO", accent, 10f, Typeface.create("sans-serif-medium", Typeface.NORMAL)))
             computerList.addView(row, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
