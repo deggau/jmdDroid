@@ -1161,6 +1161,7 @@ class MainActivity : Activity() {
         val initial = TaskNotificationSettings.load(this)
         var startMinute = initial.startMinute
         var endMinute = initial.endMinute
+        val selectedDays = initial.activeDays.toMutableSet()
         fun formatTime(minutes: Int) = "%02d:%02d".format(minutes / 60, minutes % 60)
         fun settingCheckBox(text: String, checked: Boolean) = CheckBox(this).apply {
             this.text = text
@@ -1199,6 +1200,34 @@ class MainActivity : Activity() {
         content.addView(paused)
         val limitHours = settingCheckBox("Notificar somente dentro de um horário", initial.limitToHours)
         content.addView(limitHours)
+        content.addView(label("Dias em que as notificações podem aparecer:", textMuted, 13f).apply {
+            setPadding(0, dp(4), 0, dp(2))
+        })
+        val dayOptions = listOf(
+            java.util.Calendar.SUNDAY to "Domingo",
+            java.util.Calendar.SATURDAY to "Sábado",
+            null to "Dias de semana"
+        )
+        val dayChecks = dayOptions.associate { (day, title) ->
+            title to settingCheckBox(title, if (day == null) {
+                selectedDays.containsAll(setOf(
+                    java.util.Calendar.MONDAY,
+                    java.util.Calendar.TUESDAY,
+                    java.util.Calendar.WEDNESDAY,
+                    java.util.Calendar.THURSDAY,
+                    java.util.Calendar.FRIDAY
+                ))
+            } else day in selectedDays).also(content::addView)
+        }
+        dayChecks.getValue("Dias de semana").setOnCheckedChangeListener { _, checked ->
+            val weekdays = setOf(java.util.Calendar.MONDAY, java.util.Calendar.TUESDAY, java.util.Calendar.WEDNESDAY, java.util.Calendar.THURSDAY, java.util.Calendar.FRIDAY)
+            if (checked) selectedDays.addAll(weekdays) else selectedDays.removeAll(weekdays)
+        }
+        listOf(java.util.Calendar.SUNDAY to "Domingo", java.util.Calendar.SATURDAY to "Sábado").forEach { (day, title) ->
+            dayChecks.getValue(title).setOnCheckedChangeListener { _, checked ->
+                if (checked) selectedDays.add(day) else selectedDays.remove(day)
+            }
+        }
         val timeRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -1241,13 +1270,18 @@ class MainActivity : Activity() {
                             showBrandedMessage("Selecione pelo menos uma prioridade.")
                             return@setOnClickListener
                         }
+                        if (enabled.isChecked && limitHours.isChecked && selectedDays.isEmpty()) {
+                            showBrandedMessage("Selecione pelo menos um dia da semana.")
+                            return@setOnClickListener
+                        }
                         val config = TaskNotificationConfig(
                             enabled.isChecked,
                             selectedPriorities,
                             paused.isChecked,
                             limitHours.isChecked,
                             startMinute,
-                            endMinute
+                            endMinute,
+                            selectedDays.toSet()
                         )
                         TaskNotificationSettings.save(this, config)
                         if (config.enabled) {

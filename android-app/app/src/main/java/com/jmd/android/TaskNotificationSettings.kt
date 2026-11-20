@@ -1,6 +1,7 @@
 package com.jmd.android
 
 import android.content.Context
+import java.util.Calendar
 
 internal data class TaskNotificationConfig(
     val enabled: Boolean,
@@ -8,10 +9,18 @@ internal data class TaskNotificationConfig(
     val paused: Boolean,
     val limitToHours: Boolean,
     val startMinute: Int,
-    val endMinute: Int
+    val endMinute: Int,
+    val activeDays: Set<Int>
 ) {
-    fun isWithinHours(minuteOfDay: Int): Boolean {
-        if (!limitToHours || startMinute == endMinute) return true
+    fun isWithinHours(minuteOfDay: Int, dayOfWeek: Int): Boolean {
+        if (!limitToHours) return true
+        val scheduledDay = if (startMinute == endMinute || startMinute < endMinute || minuteOfDay >= startMinute) {
+            dayOfWeek
+        } else {
+            if (dayOfWeek == Calendar.SUNDAY) Calendar.SATURDAY else dayOfWeek - 1
+        }
+        if (scheduledDay !in activeDays) return false
+        if (startMinute == endMinute) return true
         return if (startMinute < endMinute) {
             minuteOfDay in startMinute until endMinute
         } else {
@@ -19,8 +28,8 @@ internal data class TaskNotificationConfig(
         }
     }
 
-    fun shouldNotify(categoryColor: String, minuteOfDay: Int): Boolean =
-        enabled && !paused && categoryColor in priorities && isWithinHours(minuteOfDay)
+    fun shouldNotify(categoryColor: String, minuteOfDay: Int, dayOfWeek: Int): Boolean =
+        enabled && !paused && categoryColor in priorities && isWithinHours(minuteOfDay, dayOfWeek)
 }
 
 internal object TaskNotificationSettings {
@@ -34,6 +43,7 @@ internal object TaskNotificationSettings {
     private const val KEY_LIMIT_HOURS = "limit_hours"
     private const val KEY_START_MINUTE = "start_minute"
     private const val KEY_END_MINUTE = "end_minute"
+    private const val KEY_ACTIVE_DAYS = "active_days"
     private const val KEY_INITIALIZED = "initialized"
     private const val KEY_SEEN_IDS = "seen_ids"
     private const val KEY_REMINDER_PREFIX = "reminder_notified_"
@@ -45,9 +55,11 @@ internal object TaskNotificationSettings {
             priorities = prefs.getStringSet(KEY_PRIORITIES, setOf("Vermelho", "Laranja"))?.toSet()
                 ?: setOf("Vermelho", "Laranja"),
             paused = prefs.getBoolean(KEY_PAUSED, false),
-            limitToHours = prefs.getBoolean(KEY_LIMIT_HOURS, false),
-            startMinute = prefs.getInt(KEY_START_MINUTE, 8 * 60).coerceIn(0, 1439),
-            endMinute = prefs.getInt(KEY_END_MINUTE, 18 * 60).coerceIn(0, 1439)
+            limitToHours = prefs.getBoolean(KEY_LIMIT_HOURS, true),
+            startMinute = prefs.getInt(KEY_START_MINUTE, 9 * 60).coerceIn(0, 1439),
+            endMinute = prefs.getInt(KEY_END_MINUTE, 17 * 60).coerceIn(0, 1439),
+            activeDays = prefs.getStringSet(KEY_ACTIVE_DAYS, weekdays().map(Int::toString).toSet())?.mapNotNull { it.toIntOrNull() }?.toSet()
+                ?.intersect((Calendar.SUNDAY..Calendar.SATURDAY).toSet()) ?: weekdays()
         )
     }
 
@@ -59,8 +71,11 @@ internal object TaskNotificationSettings {
             .putBoolean(KEY_LIMIT_HOURS, config.limitToHours)
             .putInt(KEY_START_MINUTE, config.startMinute.coerceIn(0, 1439))
             .putInt(KEY_END_MINUTE, config.endMinute.coerceIn(0, 1439))
+            .putStringSet(KEY_ACTIVE_DAYS, config.activeDays.intersect((Calendar.SUNDAY..Calendar.SATURDAY).toSet()).map(Int::toString).toSet())
             .apply()
     }
+
+    private fun weekdays() = setOf(Calendar.MONDAY, Calendar.TUESDAY, Calendar.WEDNESDAY, Calendar.THURSDAY, Calendar.FRIDAY)
 
     fun hasBaseline(context: Context): Boolean =
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).getBoolean(KEY_INITIALIZED, false)

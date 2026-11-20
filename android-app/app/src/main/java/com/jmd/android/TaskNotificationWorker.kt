@@ -51,7 +51,8 @@ internal class TaskNotificationWorker(context: Context, params: WorkerParameters
             val newTaskIds = newTasks.map { it.id }.toSet()
             val now = Calendar.getInstance()
             val minuteOfDay = now.get(Calendar.HOUR_OF_DAY) * 60 + now.get(Calendar.MINUTE)
-            newTasks.filter { config.shouldNotify(it.categoryColor, minuteOfDay) }.forEach { showNotification(it, reminder = false) }
+            val dayOfWeek = now.get(Calendar.DAY_OF_WEEK)
+            newTasks.filter { config.shouldNotify(it.categoryColor, minuteOfDay, dayOfWeek) }.forEach { showNotification(it, reminder = false) }
 
             tasks.forEach { task ->
                 val intervalMillis = task.reminderIntervalMinutes?.takeIf { it > 0 }?.toLong()?.times(60_000L)
@@ -63,7 +64,7 @@ internal class TaskNotificationWorker(context: Context, params: WorkerParameters
                     TaskNotificationSettings.saveReminderNotifiedAt(applicationContext, task.id, nowMillis)
                 } else if (task.id !in newTaskIds &&
                     nowMillis - lastNotifiedAt >= intervalMillis &&
-                    config.shouldNotify(task.categoryColor, minuteOfDay)
+                    config.shouldNotify(task.categoryColor, minuteOfDay, dayOfWeek)
                 ) {
                     showNotification(task, reminder = true)
                     TaskNotificationSettings.saveReminderNotifiedAt(applicationContext, task.id, nowMillis)
