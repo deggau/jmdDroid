@@ -8,6 +8,7 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
+import android.graphics.Rect
 import android.graphics.PixelFormat
 import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
@@ -20,6 +21,7 @@ import android.os.HandlerThread
 import android.os.IBinder
 import android.os.SystemClock
 import android.view.WindowManager
+import android.view.KeyEvent
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
@@ -58,6 +60,7 @@ internal class JmdroidConnectionService : Service() {
     private val isCapturing = AtomicBoolean(false)
     @Volatile private var screenWidth = 0
     @Volatile private var screenHeight = 0
+    @Volatile private var captureContentRect = CaptureContentRect(0, 0, 0, 0)
     private val reconnectRunnable = Runnable { connectSocket() }
     private var stoppingService = false
     private val projectionCallback = object : MediaProjection.Callback() {
@@ -89,6 +92,13 @@ internal class JmdroidConnectionService : Service() {
                 intent.getStringExtra(EXTRA_SHARE_ID).orEmpty(),
                 intent.getIntExtra(EXTRA_VIEWER_WIDTH, 0),
                 intent.getIntExtra(EXTRA_VIEWER_HEIGHT, 0)
+            )
+            ACTION_VIEWER_VIEWPORT -> sendDesktopViewerViewport(
+                intent.getStringExtra(EXTRA_SHARE_ID).orEmpty(),
+                intent.getDoubleExtra(EXTRA_VIEWPORT_X, 0.0),
+                intent.getDoubleExtra(EXTRA_VIEWPORT_Y, 0.0),
+                intent.getDoubleExtra(EXTRA_VIEWPORT_WIDTH, 1.0),
+                intent.getDoubleExtra(EXTRA_VIEWPORT_HEIGHT, 1.0)
             )
             ACTION_VIEWER_STOP -> requestStopDesktopScreenShare(intent.getStringExtra(EXTRA_SHARE_ID).orEmpty())
             ACTION_RECONNECT -> reconnect()
@@ -148,6 +158,7 @@ internal class JmdroidConnectionService : Service() {
                         "screen_share.start" -> receiveShareRequest(message)
                         "screen_share.stop" -> receiveShareStop(message.optString("shareId"))
                         "screen_share.input" -> receiveScreenShareInput(message)
+                        "screen_share.key" -> receiveScreenShareKey(message)
                         "desktop_screen_share.start" -> receiveDesktopScreenShareRequest(message)
                         "desktop_screen_share.stop" -> receiveDesktopScreenShareStop(message.optString("shareId"))
                         "desktop_screen_share.stopped" -> finishDesktopScreenShare(message.optString("shareId"))
@@ -262,7 +273,7 @@ internal class JmdroidConnectionService : Service() {
         val frameWidth = if (message.has("frameWidth")) message.optInt("frameWidth", 0) else width
         val frameHeight = if (message.has("frameHeight")) message.optInt("frameHeight", 0) else height
         if (frameWidth !in 1..2400 || frameHeight !in 1..2400) return
-        val point = mapFramePoint(x, y, frameWidth, frameHeight, width, height) ?: return
+        val point = mapFramePoint(x, y, frameWidth, frameHeight, width, height, captureContentRect) ?: return
         val pointX = point.first
         val pointY = point.second
         val onRejected = {
@@ -276,7 +287,7 @@ internal class JmdroidConnectionService : Service() {
                 val endX = message.optDouble("endX", Double.NaN)
                 val endY = message.optDouble("endY", Double.NaN)
                 if (!endX.isFinite() || !endY.isFinite() || endX !in 0.0..1.0 || endY !in 0.0..1.0) return
-                val end = mapFramePoint(endX, endY, frameWidth, frameHeight, width, height) ?: return
+                val end = mapFramePoint(endX, endY, frameWidth, frameHeight, width, height, captureContentRect) ?: return
                 val duration = message.optInt("durationMilliseconds", 420).coerceIn(50, 5000)
                 JmdroidRemoteInputAccessibilityService.performSwipe(pointX, pointY, end.first, end.second, duration.toLong(), onRejected)
             }
@@ -312,21 +323,101 @@ internal class JmdroidConnectionService : Service() {
         }
     }
 
+    private fun receiveScreenShareKey(message: JSONObject) {
+        val shareId = message.optString("shareId")
+        if (shareId.isBlank() || shareRequest?.shareId != shareId || !isCapturing.get()) return
+        val keyCode = message.optInt("keyCode", KeyEvent.KEYCODE_UNKNOWN)
+        val action = when (message.optString("action")) {
+            "down" -> KeyEvent.ACTION_DOWN
+            "up" -> KeyEvent.ACTION_UP
+            else -> return
+        }
+        val metaState = message.optInt("metaState", 0)
+        val allowedMetaState = KeyEvent.META_SHIFT_ON or KeyEvent.META_ALT_ON or KeyEvent.META_CTRL_ON or
+            KeyEvent.META_META_ON or KeyEvent.META_SYM_ON or KeyEvent.META_FUNCTION_ON or
+            KeyEvent.META_CAPS_LOCK_ON or KeyEvent.META_NUM_LOCK_ON or KeyEvent.META_SCROLL_LOCK_ON
+        if (!isRemoteKeyAllowed(keyCode) || metaState and allowedMetaState.inv() != 0) return
+        JmdroidRemoteKeyboardService.dispatchRemoteKey(keyCode, action, metaState) { success ->
+            if (shareRequest?.shareId == shareId && isCapturing.get()) {
+                val response = JSONObject()
+                    .put("type", "screen_share.key_result")
+                    .put("shareId", shareId)
+                    .put("success", success)
+                if (!success) response.put("message", "Ative o Teclado remoto do JMDroid e mantenha um campo de texto focado.")
+                webSocket?.send(response.toString())
+            }
+        }
+    }
+
+    private fun isRemoteKeyAllowed(keyCode: Int): Boolean =
+        keyCode in KeyEvent.KEYCODE_0..KeyEvent.KEYCODE_9 ||
+            keyCode in KeyEvent.KEYCODE_A..KeyEvent.KEYCODE_Z ||
+            keyCode in KeyEvent.KEYCODE_NUMPAD_0..KeyEvent.KEYCODE_NUMPAD_9 ||
+            keyCode in KeyEvent.KEYCODE_F1..KeyEvent.KEYCODE_F12 ||
+            keyCode in setOf(
+                KeyEvent.KEYCODE_DEL,
+                KeyEvent.KEYCODE_FORWARD_DEL,
+                KeyEvent.KEYCODE_ENTER,
+                KeyEvent.KEYCODE_TAB,
+                KeyEvent.KEYCODE_ESCAPE,
+                KeyEvent.KEYCODE_SPACE,
+                KeyEvent.KEYCODE_DPAD_UP,
+                KeyEvent.KEYCODE_DPAD_DOWN,
+                KeyEvent.KEYCODE_DPAD_LEFT,
+                KeyEvent.KEYCODE_DPAD_RIGHT,
+                KeyEvent.KEYCODE_DPAD_CENTER,
+                KeyEvent.KEYCODE_MOVE_HOME,
+                KeyEvent.KEYCODE_MOVE_END,
+                KeyEvent.KEYCODE_PAGE_UP,
+                KeyEvent.KEYCODE_PAGE_DOWN,
+                KeyEvent.KEYCODE_COMMA,
+                KeyEvent.KEYCODE_PERIOD,
+                KeyEvent.KEYCODE_MINUS,
+                KeyEvent.KEYCODE_EQUALS,
+                KeyEvent.KEYCODE_LEFT_BRACKET,
+                KeyEvent.KEYCODE_RIGHT_BRACKET,
+                KeyEvent.KEYCODE_BACKSLASH,
+                KeyEvent.KEYCODE_SEMICOLON,
+                KeyEvent.KEYCODE_APOSTROPHE,
+                KeyEvent.KEYCODE_SLASH,
+                KeyEvent.KEYCODE_GRAVE,
+                KeyEvent.KEYCODE_PLUS,
+                KeyEvent.KEYCODE_SHIFT_LEFT,
+                KeyEvent.KEYCODE_SHIFT_RIGHT,
+                KeyEvent.KEYCODE_CTRL_LEFT,
+                KeyEvent.KEYCODE_CTRL_RIGHT,
+                KeyEvent.KEYCODE_ALT_LEFT,
+                KeyEvent.KEYCODE_ALT_RIGHT,
+                KeyEvent.KEYCODE_META_LEFT,
+                KeyEvent.KEYCODE_META_RIGHT,
+                KeyEvent.KEYCODE_INSERT,
+                KeyEvent.KEYCODE_NUMPAD_ADD,
+                KeyEvent.KEYCODE_NUMPAD_SUBTRACT,
+                KeyEvent.KEYCODE_NUMPAD_MULTIPLY,
+                KeyEvent.KEYCODE_NUMPAD_DIVIDE,
+                KeyEvent.KEYCODE_NUMPAD_DOT
+            )
+
     private fun mapFramePoint(
         x: Double,
         y: Double,
         frameWidth: Int,
         frameHeight: Int,
         screenWidth: Int,
-        screenHeight: Int
+        screenHeight: Int,
+        contentRect: CaptureContentRect
     ): Pair<Float, Float>? {
         if (frameWidth <= 0 || frameHeight <= 0 || screenWidth <= 0 || screenHeight <= 0) return null
         val frameX = (x * (frameWidth - 1)).roundToInt()
         val frameY = (y * (frameHeight - 1)).roundToInt()
-        val screenX = if (frameWidth == 1) 0f else frameX.toFloat() * (screenWidth - 1f) / (frameWidth - 1f)
-        val screenY = if (frameHeight == 1) 0f else frameY.toFloat() * (screenHeight - 1f) / (frameHeight - 1f)
+        val capture = contentRect.takeIf { it.width > 0 && it.height > 0 }
+            ?: CaptureContentRect(0, 0, screenWidth, screenHeight)
+        val screenX = capture.left + if (frameWidth == 1) 0f else frameX.toFloat() * (capture.width - 1f) / (frameWidth - 1f)
+        val screenY = capture.top + if (frameHeight == 1) 0f else frameY.toFloat() * (capture.height - 1f) / (frameHeight - 1f)
         return screenX.coerceIn(0f, screenWidth - 1f) to screenY.coerceIn(0f, screenHeight - 1f)
     }
+
+    private data class CaptureContentRect(val left: Int, val top: Int, val width: Int, val height: Int)
 
     private fun receiveDesktopScreenShareRequest(message: JSONObject) {
         val shareId = message.optString("shareId")
@@ -396,6 +487,19 @@ internal class JmdroidConnectionService : Service() {
         desktopScreenShareStopping = false
         notificationManager().cancel(DESKTOP_SHARE_NOTIFICATION_ID)
         sendControl("desktop_screen_share.ready", shareId, width = width, height = height)
+    }
+
+    private fun sendDesktopViewerViewport(shareId: String, x: Double, y: Double, width: Double, height: Double) {
+        if (desktopScreenShareId != shareId || desktopScreenShareStopping) return
+        if (x < 0.0 || y < 0.0 || width < 0.02 || height < 0.02 || x + width > 1.000001 || y + height > 1.000001) return
+        val json = JSONObject()
+            .put("type", "desktop_screen_share.viewport")
+            .put("shareId", shareId)
+            .put("x", x)
+            .put("y", y)
+            .put("width", width)
+            .put("height", height)
+        webSocket?.send(json.toString())
     }
 
     private fun requestStopDesktopScreenShare(shareId: String) {
@@ -499,6 +603,11 @@ internal class JmdroidConnectionService : Service() {
             // projection resize; input coordinates are mapped back to these pixels.
             screenWidth = frame.width
             screenHeight = frame.height
+            val cropRect = Rect(frame.cropRect).apply {
+                intersect(0, 0, frame.width, frame.height)
+            }.takeIf { it.width() > 0 && it.height() > 0 }
+                ?: Rect(0, 0, frame.width, frame.height)
+            captureContentRect = CaptureContentRect(cropRect.left, cropRect.top, cropRect.width(), cropRect.height())
             val now = SystemClock.elapsedRealtimeNanos()
             val interval = 1_000_000_000L / request.maxFps
             if (now - lastFrameNanos < interval) return
@@ -512,7 +621,7 @@ internal class JmdroidConnectionService : Service() {
             try {
                 bitmap = Bitmap.createBitmap(paddedWidth, frame.height, Bitmap.Config.ARGB_8888)
                 bitmap.copyPixelsFromBuffer(plane.buffer)
-                cropped = if (paddedWidth == frame.width) bitmap else Bitmap.createBitmap(bitmap, 0, 0, frame.width, frame.height)
+                cropped = Bitmap.createBitmap(bitmap, cropRect.left, cropRect.top, cropRect.width(), cropRect.height())
                 var outBitmap = cropped
                 if (max(outBitmap.width, outBitmap.height) > request.maxDimension) {
                     val ratio = request.maxDimension.toFloat() / max(outBitmap.width, outBitmap.height)
@@ -691,9 +800,14 @@ internal class JmdroidConnectionService : Service() {
         const val EXTRA_PROJECTION_RESULT = "projectionResult"
         const val EXTRA_PROJECTION_DATA = "projectionData"
         const val ACTION_VIEWER_READY = "com.jmd.android.action.DESKTOP_VIEWER_READY"
+        const val ACTION_VIEWER_VIEWPORT = "com.jmd.android.action.DESKTOP_VIEWER_VIEWPORT"
         const val ACTION_VIEWER_STOP = "com.jmd.android.action.DESKTOP_VIEWER_STOP"
         private const val EXTRA_VIEWER_WIDTH = "viewerWidth"
         private const val EXTRA_VIEWER_HEIGHT = "viewerHeight"
+        private const val EXTRA_VIEWPORT_X = "viewportX"
+        private const val EXTRA_VIEWPORT_Y = "viewportY"
+        private const val EXTRA_VIEWPORT_WIDTH = "viewportWidth"
+        private const val EXTRA_VIEWPORT_HEIGHT = "viewportHeight"
         private const val SERVICE_CHANNEL_ID = "jmdroid_connection_service"
         private const val SHARE_CHANNEL_ID = "jmdroid_screen_share_request"
         private const val SERVICE_NOTIFICATION_ID = 4301
@@ -712,6 +826,13 @@ internal class JmdroidConnectionService : Service() {
             context.startService(Intent(context, JmdroidConnectionService::class.java)
                 .setAction(ACTION_VIEWER_READY).putExtra(EXTRA_SHARE_ID, shareId)
                 .putExtra(EXTRA_VIEWER_WIDTH, width).putExtra(EXTRA_VIEWER_HEIGHT, height))
+        }
+
+        fun sendDesktopViewerViewport(context: Context, shareId: String, x: Float, y: Float, width: Float, height: Float) {
+            context.startService(Intent(context, JmdroidConnectionService::class.java)
+                .setAction(ACTION_VIEWER_VIEWPORT).putExtra(EXTRA_SHARE_ID, shareId)
+                .putExtra(EXTRA_VIEWPORT_X, x.toDouble()).putExtra(EXTRA_VIEWPORT_Y, y.toDouble())
+                .putExtra(EXTRA_VIEWPORT_WIDTH, width.toDouble()).putExtra(EXTRA_VIEWPORT_HEIGHT, height.toDouble()))
         }
 
         fun stopDesktopScreenShare(context: Context, shareId: String) {

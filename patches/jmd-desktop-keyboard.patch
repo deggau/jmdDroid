@@ -1,0 +1,122 @@
+diff --git a/docs/api/jmdroid-api.md b/docs/api/jmdroid-api.md
+index 3bba476..f69e9ba 100644
+--- a/docs/api/jmdroid-api.md
++++ b/docs/api/jmdroid-api.md
+@@ -316,0 +317,14 @@ O JMD mostra essa mensagem na janela de transmissão. Aceite gestos somente quan
++Para encaminhar teclas físicas enquanto a janela de imagem está focada, o JMD envia screen_share.key pela mesma sessão autenticada:
++
++```json
++{
++  "type": "screen_share.key",
++  "shareId": "id-opaco-da-transmissao",
++  "keyCode": 29,
++  "action": "down",
++  "metaState": 0
++}
++```
++
++O keyCode usa os códigos de tecla Android (KeyEvent.KEYCODE_*); action é down ou up. metaState contém os modificadores Android ativos (Shift, Alt, Ctrl e Meta). O Android responde com screen_share.key_result, contendo shareId, success e opcionalmente message. O recebimento requer habilitar o teclado JMDroid nas configurações do sistema e manter um campo de texto focado. Para texto longo ou Unicode, use screen_share.text.
++
+diff --git a/src/JMD.App/AndroidScreenShareWindow.cs b/src/JMD.App/AndroidScreenShareWindow.cs
+index 566a010..7742683 100644
+--- a/src/JMD.App/AndroidScreenShareWindow.cs
++++ b/src/JMD.App/AndroidScreenShareWindow.cs
+@@ -27,0 +28 @@ internal sealed class AndroidScreenShareWindow : Window
++    public event Action<string, int, string, int>? KeyRequested;
+@@ -53,0 +55,2 @@ internal sealed class AndroidScreenShareWindow : Window
++        _image.PreviewKeyDown += OnPreviewKeyDown;
++        _image.PreviewKeyUp += OnPreviewKeyUp;
+@@ -195,0 +199,2 @@ internal sealed class AndroidScreenShareWindow : Window
++            _image.Focus();
++            Keyboard.Focus(_image);
+@@ -237,0 +243,40 @@ internal sealed class AndroidScreenShareWindow : Window
++    private void OnPreviewKeyDown(object sender, KeyEventArgs e) => SendKey(e, "down");
++    private void OnPreviewKeyUp(object sender, KeyEventArgs e) => SendKey(e, "up");
++
++    private void SendKey(KeyEventArgs e, string action)
++    {
++        var key = e.Key == Key.System ? e.SystemKey : e.Key;
++        if (!TryGetAndroidKeyCode(key, out var keyCode)) return;
++        var modifiers = Keyboard.Modifiers;
++        var metaState = 0;
++        if ((modifiers & ModifierKeys.Shift) != 0) metaState |= 1;
++        if ((modifiers & ModifierKeys.Alt) != 0) metaState |= 2;
++        if ((modifiers & ModifierKeys.Control) != 0) metaState |= 4096;
++        if ((modifiers & ModifierKeys.Windows) != 0) metaState |= 65536;
++        KeyRequested?.Invoke(ShareId, keyCode, action, metaState);
++        e.Handled = true;
++    }
++
++    private static bool TryGetAndroidKeyCode(Key key, out int code)
++    {
++        code = key switch
++        {
++            >= Key.A and <= Key.Z => 29 + (int)key - (int)Key.A,
++            >= Key.D0 and <= Key.D9 => 7 + (int)key - (int)Key.D0,
++            >= Key.NumPad0 and <= Key.NumPad9 => 144 + (int)key - (int)Key.NumPad0,
++            >= Key.F1 and <= Key.F12 => 131 + (int)key - (int)Key.F1,
++            Key.Enter => 66, Key.Tab => 61, Key.Escape => 111, Key.Space => 62,
++            Key.Back => 67, Key.Delete => 112, Key.Insert => 124,
++            Key.Left => 21, Key.Right => 22, Key.Up => 19, Key.Down => 20,
++            Key.Home => 122, Key.End => 123, Key.PageUp => 92, Key.PageDown => 93,
++            Key.OemComma => 55, Key.OemPeriod => 56, Key.OemMinus => 69, Key.OemPlus => 70,
++            Key.OemOpenBrackets => 71, Key.OemCloseBrackets => 72, Key.OemPipe => 73,
++            Key.OemSemicolon => 74, Key.OemQuotes => 75, Key.OemQuestion => 76,
++            Key.OemTilde => 68, Key.Add => 81, Key.Subtract => 156, Key.Multiply => 155,
++            Key.Divide => 154, Key.Decimal => 158, Key.LeftShift => 59, Key.RightShift => 60,
++            Key.LeftCtrl => 113, Key.RightCtrl => 114, Key.LeftAlt => 57, Key.RightAlt => 58,
++            Key.LWin => 117, Key.RWin => 118, _ => 0
++        };
++        return code != 0;
++    }
++
+diff --git a/src/JMD.App/JmdroidApiServer.cs b/src/JMD.App/JmdroidApiServer.cs
+index 7b3da2b..bd3a815 100644
+--- a/src/JMD.App/JmdroidApiServer.cs
++++ b/src/JMD.App/JmdroidApiServer.cs
+@@ -293,0 +294,16 @@ internal sealed class JmdroidApiServer : IAsyncDisposable
++    public async Task<bool> SendScreenShareKeyAsync(string deviceId, string shareId, int keyCode, string action, int metaState)
++    {
++        if (keyCode is < 1 or > 300 || action is not ("down" or "up") || metaState < 0 ||
++            !_screenShares.TryGetValue(deviceId, out var share) || share.ShareId != shareId ||
++            !share.TryAcceptInput(DateTimeOffset.UtcNow)) return false;
++        try
++        {
++            await SendSessionMessageAsync(share.Socket, new { type = "screen_share.key", shareId, keyCode, action, metaState }, CancellationToken.None);
++            return true;
++        }
++        catch (Exception exception) when (exception is WebSocketException or ObjectDisposedException or OperationCanceledException)
++        {
++            return false;
++        }
++    }
++
+@@ -1460,0 +1477,11 @@ internal sealed class JmdroidApiServer : IAsyncDisposable
++            else if (type == "screen_share.key_result")
++            {
++                var success = root.TryGetProperty("success", out var successValue) && successValue.ValueKind == JsonValueKind.True;
++                var reason = root.TryGetProperty("message", out var messageValue) && messageValue.ValueKind == JsonValueKind.String
++                    ? messageValue.GetString()
++                    : null;
++                if (!success)
++                    ScreenShareStatusChanged?.Invoke(deviceId, string.IsNullOrWhiteSpace(reason)
++                        ? "O Android não conseguiu receber a tecla. Ative o teclado JMDroid nas configurações."
++                        : reason);
++            }
+diff --git a/src/JMD.App/MainWindow.xaml.cs b/src/JMD.App/MainWindow.xaml.cs
+index d192a63..6282d78 100644
+--- a/src/JMD.App/MainWindow.xaml.cs
++++ b/src/JMD.App/MainWindow.xaml.cs
+@@ -4734,0 +4735,2 @@ public partial class MainWindow : Window
++            window.KeyRequested += (activeShareId, keyCode, action, metaState) =>
++                _ = SendAndroidScreenShareKeyAsync(deviceId, window, activeShareId, keyCode, action, metaState);
+@@ -4761,0 +4764,9 @@ public partial class MainWindow : Window
++    private async Task SendAndroidScreenShareKeyAsync(string deviceId, AndroidScreenShareWindow window, string shareId, int keyCode, string action, int metaState)
++    {
++        var server = _jmdroidApiServer;
++        if (server is null) return;
++        var sent = await server.SendScreenShareKeyAsync(deviceId, shareId, keyCode, action, metaState);
++        if (!sent && window.IsVisible && window.ShareId == shareId)
++            window.SetTransientStatus("O Android não recebeu a tecla. Confirme se a transmissão continua ativa.");
++    }
++

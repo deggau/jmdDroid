@@ -1,3 +1,5 @@
 <resources>
     <string name="accessibility_remote_control_description">Permite reproduzir no celular toques e rolagens enviados pelo computador durante o compartilhamento de tela iniciado pelo usuário.</string>
+    <string name="remote_keyboard_label">Teclado remoto do JMDroid</string>
+    <string name="remote_keyboard_description">Encaminha teclas enviadas pelo computador ao campo com foco no celular durante o compartilhamento iniciado pelo usuário.</string>
 </resources>

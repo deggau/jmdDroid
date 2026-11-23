@@ -11,6 +11,9 @@ import android.graphics.Color
 import android.graphics.Matrix
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.os.SystemClock
 import android.view.GestureDetector
 import android.view.Gravity
 import android.view.MotionEvent
@@ -32,9 +35,14 @@ class DesktopScreenViewerActivity : Activity() {
     private var shareId: String? = null
     private var lastReadyWidth = 0
     private var lastReadyHeight = 0
-    private var zoomFactor = 1f
     private var currentBitmap: Bitmap? = null
+    private var frameViewport = ScreenViewport.FULL
+    private var pendingViewport: ScreenViewport? = null
+    private var sentViewport: ScreenViewport? = null
+    private var sentViewportAt = 0L
     private val imageMatrix = Matrix()
+    private val viewportHandler = Handler(Looper.getMainLooper())
+    private val sendViewportRunnable = Runnable { sendPendingViewport() }
     private val pendingFrame = AtomicReference<ByteArray?>(null)
     private val decodingFrame = AtomicBoolean(false)
     private val decoder = Executors.newSingleThreadExecutor()
@@ -46,7 +54,7 @@ class DesktopScreenViewerActivity : Activity() {
             lastReadyWidth = width
             lastReadyHeight = height
             JmdroidConnectionService.sendDesktopViewerReady(this, id, width, height)
-            updateImageMatrix(resetZoom = false)
+            updateImageMatrix()
         }
     }
     private val receiver = object : BroadcastReceiver() {
@@ -64,17 +72,7 @@ class DesktopScreenViewerActivity : Activity() {
         ScaleGestureDetector(this, object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
             override fun onScale(detector: ScaleGestureDetector): Boolean {
                 if (currentBitmap == null) return false
-                val nextZoom = (zoomFactor * detector.scaleFactor).coerceIn(1f, MAX_ZOOM)
-                val appliedScale = nextZoom / zoomFactor
-                zoomFactor = nextZoom
-                if (zoomFactor <= 1.001f) {
-                    zoomFactor = 1f
-                    updateImageMatrix(resetZoom = true)
-                } else {
-                    imageMatrix.postScale(appliedScale, appliedScale, detector.focusX, detector.focusY)
-                    constrainImageMatrix()
-                }
-                screenImage.imageMatrix = imageMatrix
+                zoomViewport(detector.scaleFactor, detector.focusX, detector.focusY)
                 return true
             }
         })
@@ -82,10 +80,14 @@ class DesktopScreenViewerActivity : Activity() {
     private val gestureDetector by lazy {
         GestureDetector(this, object : GestureDetector.SimpleOnGestureListener() {
             override fun onScroll(e1: MotionEvent?, e2: MotionEvent, distanceX: Float, distanceY: Float): Boolean {
-                if (currentBitmap == null || zoomFactor <= 1f) return false
-                imageMatrix.postTranslate(-distanceX, -distanceY)
-                constrainImageMatrix()
-                screenImage.imageMatrix = imageMatrix
+                val viewport = selectedViewport()
+                if (currentBitmap == null || viewport.isNearlyEqual(ScreenViewport.FULL)) return false
+                val width = screenImage.width.toFloat().coerceAtLeast(1f)
+                val height = screenImage.height.toFloat().coerceAtLeast(1f)
+                requestViewport(viewport.clamped(
+                    x = viewport.x + distanceX / width * viewport.width,
+                    y = viewport.y + distanceY / height * viewport.height
+                ))
                 return true
             }
 
@@ -144,6 +146,7 @@ class DesktopScreenViewerActivity : Activity() {
     }
 
     override fun onDestroy() {
+        viewportHandler.removeCallbacks(sendViewportRunnable)
         pendingFrame.set(null)
         decoder.shutdownNow()
         clearFrame()
@@ -225,11 +228,22 @@ class DesktopScreenViewerActivity : Activity() {
                     runOnUiThread {
                         if (!isFinishing && shareId != null) {
                             val old = currentBitmap
+                            val requestedViewport = sentViewport
+                            val isViewportFrame = requestedViewport != null &&
+                                SystemClock.uptimeMillis() - sentViewportAt >= VIEWPORT_FRAME_SETTLE_MS
+                            if (requestedViewport != null && !isViewportFrame) {
+                                bitmap.recycle()
+                                return@runOnUiThread
+                            }
+                            if (isViewportFrame) {
+                                frameViewport = requestedViewport!!
+                                sentViewport = null
+                            }
                             val keepViewport = old != null && old.width == bitmap.width && old.height == bitmap.height
                             currentBitmap = bitmap
                             screenImage.setImageBitmap(bitmap)
                             statusText.visibility = View.GONE
-                            if (!keepViewport) updateImageMatrix(resetZoom = false)
+                            if (isViewportFrame || !keepViewport) updateImageMatrix()
                             old?.recycle()
                         } else bitmap.recycle()
                     }
@@ -253,10 +267,13 @@ class DesktopScreenViewerActivity : Activity() {
         screenImage.setImageDrawable(null)
         imageMatrix.reset()
         screenImage.imageMatrix = imageMatrix
-        zoomFactor = 1f
         currentBitmap?.recycle()
         currentBitmap = null
         pendingFrame.set(null)
+        frameViewport = ScreenViewport.FULL
+        pendingViewport = null
+        sentViewport = null
+        viewportHandler.removeCallbacks(sendViewportRunnable)
     }
 
     private fun zoomControl(
@@ -277,37 +294,77 @@ class DesktopScreenViewerActivity : Activity() {
     }
 
     private fun zoomBy(factor: Float) {
-        if (currentBitmap == null || screenImage.width == 0 || screenImage.height == 0) return
-        val nextZoom = (zoomFactor * factor).coerceIn(1f, MAX_ZOOM)
-        if (nextZoom <= 1.001f) {
-            resetZoom()
-            return
-        }
-        val scale = nextZoom / zoomFactor
-        zoomFactor = nextZoom
-        imageMatrix.postScale(scale, scale, screenImage.width / 2f, screenImage.height / 2f)
-        constrainImageMatrix()
-        screenImage.imageMatrix = imageMatrix
+        zoomViewport(factor, screenImage.width / 2f, screenImage.height / 2f)
     }
 
     private fun resetZoom() {
-        zoomFactor = 1f
-        updateImageMatrix(resetZoom = true)
+        requestViewport(ScreenViewport.FULL)
     }
 
-    private fun updateImageMatrix(resetZoom: Boolean) {
+    private fun zoomViewport(factor: Float, focusX: Float, focusY: Float) {
+        val bitmap = currentBitmap ?: return
+        if (screenImage.width <= 0 || screenImage.height <= 0) return
+        if (factor <= 0f) return
+        val current = selectedViewport()
+        val inverse = Matrix()
+        if (!imageMatrix.invert(inverse)) return
+        val focus = floatArrayOf(focusX, focusY)
+        inverse.mapPoints(focus)
+        val focusFractionX = (focus[0] / bitmap.width).coerceIn(0f, 1f)
+        val focusFractionY = (focus[1] / bitmap.height).coerceIn(0f, 1f)
+        val expansion = 1f / factor
+        val maxExpansion = minOf(1f / current.width, 1f / current.height)
+        if (expansion >= maxExpansion) {
+            requestViewport(ScreenViewport.FULL)
+            return
+        }
+        val newWidth = (current.width * expansion).coerceIn(MIN_VIEWPORT_FRACTION, 1f)
+        val newHeight = (current.height * expansion).coerceIn(MIN_VIEWPORT_FRACTION, 1f)
+        val focusInScreenX = current.x + focusFractionX * current.width
+        val focusInScreenY = current.y + focusFractionY * current.height
+        requestViewport(ScreenViewport(
+            focusInScreenX - focusFractionX * newWidth,
+            focusInScreenY - focusFractionY * newHeight,
+            newWidth,
+            newHeight
+        ).clamped())
+    }
+
+    private fun selectedViewport(): ScreenViewport = pendingViewport ?: sentViewport ?: frameViewport
+
+    private fun requestViewport(viewport: ScreenViewport) {
+        if (viewport.isNearlyEqual(frameViewport) && sentViewport == null) {
+            pendingViewport = null
+            viewportHandler.removeCallbacks(sendViewportRunnable)
+            return
+        }
+        pendingViewport = viewport
+        viewportHandler.removeCallbacks(sendViewportRunnable)
+        viewportHandler.postDelayed(sendViewportRunnable, VIEWPORT_DEBOUNCE_MS)
+    }
+
+    private fun sendPendingViewport() {
+        val id = shareId ?: return
+        val viewport = pendingViewport ?: return
+        pendingViewport = null
+        sentViewport = viewport
+        sentViewportAt = SystemClock.uptimeMillis()
+        JmdroidConnectionService.sendDesktopViewerViewport(
+            this, id, viewport.x, viewport.y, viewport.width, viewport.height
+        )
+    }
+
+    private fun updateImageMatrix() {
         val bitmap = currentBitmap ?: return
         val viewWidth = screenImage.width
         val viewHeight = screenImage.height
         if (viewWidth <= 0 || viewHeight <= 0) return
-        if (resetZoom) zoomFactor = 1f
         val baseScale = minOf(viewWidth.toFloat() / bitmap.width, viewHeight.toFloat() / bitmap.height)
         val drawnWidth = bitmap.width * baseScale
         val drawnHeight = bitmap.height * baseScale
         imageMatrix.reset()
         imageMatrix.setScale(baseScale, baseScale)
         imageMatrix.postTranslate((viewWidth - drawnWidth) / 2f, (viewHeight - drawnHeight) / 2f)
-        if (zoomFactor > 1f) imageMatrix.postScale(zoomFactor, zoomFactor, viewWidth / 2f, viewHeight / 2f)
         constrainImageMatrix()
         screenImage.imageMatrix = imageMatrix
     }
@@ -340,8 +397,31 @@ class DesktopScreenViewerActivity : Activity() {
 
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
 
+    private data class ScreenViewport(val x: Float, val y: Float, val width: Float, val height: Float) {
+        fun clamped(x: Float = this.x, y: Float = this.y): ScreenViewport {
+            val safeWidth = width.coerceIn(MIN_VIEWPORT_FRACTION, 1f)
+            val safeHeight = height.coerceIn(MIN_VIEWPORT_FRACTION, 1f)
+            val safeX = x.coerceIn(0f, 1f - safeWidth)
+            val safeY = y.coerceIn(0f, 1f - safeHeight)
+            return ScreenViewport(safeX, safeY, safeWidth, safeHeight)
+        }
+
+        fun isNearlyEqual(other: ScreenViewport): Boolean =
+            kotlin.math.abs(x - other.x) < VIEWPORT_CHANGE_EPSILON &&
+                kotlin.math.abs(y - other.y) < VIEWPORT_CHANGE_EPSILON &&
+                kotlin.math.abs(width - other.width) < VIEWPORT_CHANGE_EPSILON &&
+                kotlin.math.abs(height - other.height) < VIEWPORT_CHANGE_EPSILON
+
+        companion object {
+            val FULL = ScreenViewport(0f, 0f, 1f, 1f)
+        }
+    }
+
     private companion object {
         const val ZOOM_STEP = 1.25f
-        const val MAX_ZOOM = 5f
+        const val MIN_VIEWPORT_FRACTION = 0.02f
+        const val VIEWPORT_CHANGE_EPSILON = 0.003f
+        const val VIEWPORT_DEBOUNCE_MS = 140L
+        const val VIEWPORT_FRAME_SETTLE_MS = 100L
     }
 }

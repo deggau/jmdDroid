@@ -1,0 +1,7 @@
+<input-method xmlns:android="http://schemas.android.com/apk/res/android"
+    android:supportsSwitchingToNextInputMethod="false">
+    <subtype
+        android:label="@string/remote_keyboard_description"
+        android:imeSubtypeLocale="pt_BR"
+        android:imeSubtypeMode="keyboard" />
+</input-method>

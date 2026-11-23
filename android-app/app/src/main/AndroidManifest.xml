@@ -49,5 +49,17 @@
                 android:name="android.accessibilityservice"
                 android:resource="@xml/jmdroid_accessibility_service" />
         </service>
+        <service
+            android:name=".JmdroidRemoteKeyboardService"
+            android:label="@string/remote_keyboard_label"
+            android:permission="android.permission.BIND_INPUT_METHOD"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.view.InputMethod" />
+            </intent-filter>
+            <meta-data
+                android:name="android.view.im"
+                android:resource="@xml/jmdroid_input_method" />
+        </service>
     </application>
 </manifest>

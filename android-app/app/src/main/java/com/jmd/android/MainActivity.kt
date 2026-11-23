@@ -1375,11 +1375,15 @@ class MainActivity : Activity() {
         AlertDialog.Builder(this)
             .setTitle("Controle remoto de toques")
             .setMessage(if (enabled) {
-                "Acessibilidade está habilitada. Durante o compartilhamento da tela, o JMD poderá enviar toques e rolagens para este celular. Você pode desativar o serviço a qualquer momento nas configurações do Android."
+                "Acessibilidade está habilitada para receber toques e rolagens. Para receber teclas, habilite também o Teclado remoto do JMDroid nas configurações de teclados do Android. O JMD só encaminha entrada enquanto um compartilhamento iniciado por você estiver ativo."
             } else {
-                "O Android não permite conceder Acessibilidade durante a instalação; é necessário ativar manualmente. Para reproduzir cliques e rolagens do computador, abra Acessibilidade e habilite Controle remoto do JMDroid. O compartilhamento da imagem pode continuar sem isso."
+                "O Android exige que você habilite manualmente o Controle remoto do JMDroid em Acessibilidade para receber cliques e rolagens. Para receber teclas, habilite também o Teclado remoto do JMDroid nas configurações de teclados. A imagem pode ser compartilhada sem esses controles."
             })
             .setNegativeButton("Fechar", null)
+            .setNeutralButton("Configurar teclado") { _, _ ->
+                try { startActivity(Intent(Settings.ACTION_INPUT_METHOD_SETTINGS)) }
+                catch (_: Exception) { showBrandedMessage("Não foi possível abrir as configurações de teclados") }
+            }
             .setPositiveButton(if (enabled) "Abrir Acessibilidade" else "Liberar cliques e rolagem") { _, _ ->
                 try { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }
                 catch (_: Exception) { showBrandedMessage("Não foi possível abrir as configurações de Acessibilidade") }
