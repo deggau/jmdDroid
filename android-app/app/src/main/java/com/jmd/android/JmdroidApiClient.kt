@@ -19,7 +19,7 @@ import javax.net.ssl.TrustManager
 import javax.net.ssl.X509TrustManager
 import javax.net.ssl.HttpsURLConnection
 
-private fun validateLocalBaseUrl(baseUrl: String): java.net.URI {
+internal fun validateLocalBaseUrl(baseUrl: String): java.net.URI {
     val url = java.net.URI(baseUrl)
     require((url.scheme.equals("http", ignoreCase = true) || url.scheme.equals("https", ignoreCase = true)) &&
         url.host != null && url.port in 1..65535 && url.userInfo == null &&
@@ -38,9 +38,7 @@ private fun validateLocalBaseUrl(baseUrl: String): java.net.URI {
 
 internal data class PairingQr(
     val baseUrl: String,
-    val certificateSha256: String,
-    val sessionId: String,
-    val pairingSecret: String
+    val certificateSha256: String
 )
 
 internal data class PairedJmd(
@@ -48,7 +46,9 @@ internal data class PairedJmd(
     val certificateSha256: String,
     val deviceId: String,
     val accessToken: String,
-    val computerName: String? = null
+    val computerName: String? = null,
+    val serverPeerId: String? = null,
+    val serverPublicKey: String? = null
 )
 internal data class RemoteCommand(
     val id: String,
@@ -413,79 +413,15 @@ internal class JmdroidApiClient(private val paired: PairedJmd) {
             if (isHttps) {
                 require(fingerprint.matches(Regex("[0-9A-F]{64}"))) { "A impressão digital do certificado no QR code é inválida." }
             }
-            return PairingQr(baseUrl, fingerprint, qr.getString("sessionId"), qr.getString("pairingSecret"))
+            return PairingQr(baseUrl, fingerprint)
         }
 
-        fun pair(qr: PairingQr, deviceName: String, appVersion: String): PairedJmd {
-            validateLocalBaseUrl(qr.baseUrl)
-            val isHttps = qr.baseUrl.startsWith("https://", ignoreCase = true)
-            val trustManager = if (isHttps) PinnedCertificateTrustManager(qr.certificateSha256) else null
-            val sslContext = trustManager?.let { manager ->
-                SSLContext.getInstance("TLS").apply { init(null, arrayOf<TrustManager>(manager), null) }
-            }
-            val claim = JSONObject()
-                .put("sessionId", qr.sessionId)
-                .put("pairingSecret", qr.pairingSecret)
-                .put("deviceName", deviceName.take(80))
-                .put("appVersion", appVersion.take(32))
-            val accepted = pairingRequest(qr, sslContext, "POST", "/api/v1/pairing/requests", claim)
-            val requestId = accepted.getString("requestId")
-            val deadline = System.currentTimeMillis() + 120_000
-            while (System.currentTimeMillis() < deadline) {
-                Thread.sleep(accepted.optLong("pollAfterMs", 1500).coerceIn(500, 5000))
-                val state = pairingRequest(qr, sslContext, "GET", "/api/v1/pairing/requests/${java.net.URLEncoder.encode(requestId, "UTF-8")}", null)
-                when (state.optString("state")) {
-                    "approved" -> return PairedJmd(
-                        qr.baseUrl,
-                        qr.certificateSha256,
-                        state.getString("deviceId"),
-                        state.getString("accessToken"),
-                        state.optString("computerName").takeIf(String::isNotBlank)
-                            ?: accepted.optString("computerName").takeIf(String::isNotBlank)
-                    )
-                    "denied" -> throw IllegalStateException("O pedido de pareamento foi negado no JMD.")
-                    "expired" -> throw IllegalStateException("O QR code expirou. Gere outro no JMD desktop.")
-                    "pending" -> Unit
-                    else -> throw IllegalStateException("Resposta de pareamento inesperada.")
-                }
-            }
-            throw IllegalStateException("O pedido expirou sem aprovação. Gere outro QR code no JMD desktop.")
-        }
-
-        private fun pairingRequest(qr: PairingQr, sslContext: SSLContext?, method: String, path: String, body: JSONObject?): JSONObject {
-            val connection = (URL("${qr.baseUrl}$path").openConnection() as HttpURLConnection).apply {
-                if (this is HttpsURLConnection) {
-                    sslSocketFactory = requireNotNull(sslContext) { "A configuração HTTPS do JMD está incompleta." }.socketFactory
-                }
-                connectTimeout = 10_000
-                readTimeout = 10_000
-                requestMethod = method
-                instanceFollowRedirects = false
-                setRequestProperty("Accept", "application/json")
-                setRequestProperty("X-JMD-Pairing-Secret", qr.pairingSecret)
-                if (body != null) {
-                    doOutput = true
-                    setRequestProperty("Content-Type", "application/json; charset=utf-8")
-                }
-            }
-            try {
-                if (body != null) connection.outputStream.use { it.write(body.toString().toByteArray(Charsets.UTF_8)) }
-                val status = connection.responseCode
-                val stream = if (status in 200..299) connection.inputStream else connection.errorStream
-                val json = stream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }?.let(::JSONObject) ?: JSONObject()
-                if (status !in 200..299) {
-                    val error = json.optJSONObject("error")
-                    throw IllegalStateException(error?.optString("message")?.takeIf { it.isNotBlank() } ?: "Falha no pareamento (HTTP $status).")
-                }
-                return json
-            } finally { connection.disconnect() }
-        }
     }
 }
 
 internal class ApiException(val status: Int, val code: String, message: String) : IllegalStateException(message)
 
-private class PinnedCertificateTrustManager(private val expectedSha256: String) : X509TrustManager {
+internal class PinnedCertificateTrustManager(private val expectedSha256: String) : X509TrustManager {
     override fun getAcceptedIssuers(): Array<X509Certificate> = emptyArray()
     override fun checkClientTrusted(chain: Array<X509Certificate>, authType: String) = Unit
     override fun checkServerTrusted(chain: Array<X509Certificate>, authType: String) {

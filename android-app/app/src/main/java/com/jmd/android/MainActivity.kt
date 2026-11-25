@@ -66,6 +66,7 @@ class MainActivity : Activity() {
     private val textMuted by lazy { getColor(R.color.jmd_muted) }
     private val border by lazy { getColor(R.color.jmd_border) }
     private val backgroundExecutor = Executors.newSingleThreadExecutor()
+    private val pairingExecutor = Executors.newSingleThreadExecutor()
     private val healthExecutor = Executors.newSingleThreadExecutor()
     private val messageHandler = android.os.Handler(android.os.Looper.getMainLooper())
     private val healthCheckRunnable = object : Runnable {
@@ -109,6 +110,14 @@ class MainActivity : Activity() {
     private val connectionServiceReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             when (intent?.action) {
+                JmdroidConnectionService.ACTION_CREDENTIALS_UPDATED -> {
+                    val updated = credentialStore.active() ?: return
+                    pairedJmd = updated
+                    jmdApiClient?.close()
+                    jmdApiClient = JmdroidApiClient(updated)
+                    allCommands = emptyList()
+                    renderComputerList()
+                }
                 JmdroidConnectionService.ACTION_CONNECTION_STATE -> {
                     val connected = intent.getBooleanExtra(JmdroidConnectionService.EXTRA_CONNECTED, false)
                     jmdSessionReady = connected
@@ -250,6 +259,7 @@ class MainActivity : Activity() {
         super.onStart()
         val filter = IntentFilter().apply {
             addAction(JmdroidConnectionService.ACTION_CONNECTION_STATE)
+            addAction(JmdroidConnectionService.ACTION_CREDENTIALS_UPDATED)
             addAction(JmdroidConnectionService.ACTION_SCREEN_SHARE_REQUEST)
             addAction(JmdroidConnectionService.ACTION_DESKTOP_SCREEN_SHARE_REQUEST)
         }
@@ -260,6 +270,7 @@ class MainActivity : Activity() {
             registerReceiver(connectionServiceReceiver, filter)
         }
         serviceReceiverRegistered = true
+        syncStoredPairingCredentials()
     }
 
     override fun onStop() {
@@ -282,6 +293,7 @@ class MainActivity : Activity() {
         messageHandler.removeCallbacks(taskHistorySearchRunnable)
         backgroundExecutor.shutdownNow()
         healthExecutor.shutdownNow()
+        pairingExecutor.shutdownNow()
         jmdApiClient?.close()
         super.onDestroy()
     }
@@ -1154,7 +1166,74 @@ class MainActivity : Activity() {
     }
 
     private fun startPairingScanner() {
-        startActivityForResult(Intent(this, QrScannerActivity::class.java), QR_SCAN_REQUEST)
+        AlertDialog.Builder(this)
+            .setTitle("Conectar ao JMD")
+            .setItems(arrayOf("Buscar computadores na rede", "Ler QR code", "Colar QR code")) { _, which ->
+                when (which) {
+                    0 -> discoverJmdComputers()
+                    1 -> startActivityForResult(Intent(this, QrScannerActivity::class.java), QR_SCAN_REQUEST)
+                    2 -> showManualPairingInput()
+                }
+            }
+            .setNegativeButton("Cancelar", null)
+            .show()
+    }
+
+    private fun discoverJmdComputers() {
+        pairingButton.isEnabled = false
+        connectionStatus.text = "Buscando computadores JMD nesta rede…"
+        pairingExecutor.execute {
+            val result = runCatching { JmdroidIdentityPairing.discover() }
+            runOnUiThread {
+                pairingButton.isEnabled = true
+                val computers = result.getOrElse { error ->
+                    connectionStatus.text = error.message ?: "Não foi possível buscar computadores nesta rede."
+                    emptyList()
+                }
+                if (computers.isEmpty()) {
+                    AlertDialog.Builder(this)
+                        .setTitle("Nenhum JMD encontrado")
+                        .setMessage("Confira se o JMD está aberto e os dois aparelhos estão na mesma rede local. Se o broadcast estiver bloqueado, use o QR code.")
+                        .setPositiveButton("Buscar novamente") { _, _ -> discoverJmdComputers() }
+                        .setNeutralButton("Ler QR code") { _, _ -> startActivityForResult(Intent(this, QrScannerActivity::class.java), QR_SCAN_REQUEST) }
+                        .setNegativeButton("Fechar", null)
+                        .show()
+                    return@runOnUiThread
+                }
+                val labels = computers.map { endpoint ->
+                    val host = runCatching { java.net.URI(endpoint.baseUrl).host }.getOrDefault(endpoint.baseUrl)
+                    "${endpoint.computerName} · $host\nJMD ${endpoint.appVersion.ifBlank { "versão desconhecida" }} · identidade ${endpoint.peerId.take(12)}…"
+                }.toTypedArray()
+                AlertDialog.Builder(this)
+                    .setTitle("Computadores encontrados")
+                    .setItems(labels) { _, index -> confirmPairingEndpoint(computers[index]) }
+                    .setNeutralButton("Ler QR code") { _, _ -> startActivityForResult(Intent(this, QrScannerActivity::class.java), QR_SCAN_REQUEST) }
+                    .setNegativeButton("Fechar", null)
+                    .show()
+            }
+        }
+    }
+
+    private fun confirmPairingEndpoint(endpoint: JmdEndpoint) {
+        val computerName = endpoint.computerName.ifBlank { runCatching { java.net.URI(endpoint.baseUrl).host }.getOrDefault(endpoint.baseUrl) }
+        val identity = endpoint.peerId.takeIf(String::isNotBlank)?.let { "Identidade RSA: ${it.take(20)}…\n" }
+            ?: "Identidade RSA: será conferida pelo desafio assinado\n"
+        val details = "$computerName\n${endpoint.baseUrl}\n${identity}JMD ${endpoint.appVersion.ifBlank { "versão desconhecida" }}"
+        if (endpoint.baseUrl.startsWith("http://", ignoreCase = true)) {
+            AlertDialog.Builder(this)
+                .setTitle("Conectar sem criptografia?")
+                .setMessage("$details\n\nHTTP não criptografa o pedido de pareamento nem o token. Use somente em uma rede local confiável.")
+                .setNegativeButton("Cancelar", null)
+                .setPositiveButton("Continuar") { _, _ -> startPairing(endpoint) }
+                .show()
+        } else {
+            AlertDialog.Builder(this)
+                .setTitle("Confirmar computador")
+                .setMessage("$details\n\nA identidade será conferida por desafio RSA antes de solicitar aprovação no desktop.")
+                .setNegativeButton("Cancelar", null)
+                .setPositiveButton("Conectar") { _, _ -> startPairing(endpoint) }
+                .show()
+        }
     }
 
     private fun showTaskNotificationSettings() {
@@ -1462,7 +1541,20 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun computerId(paired: PairedJmd) = "${paired.baseUrl.trimEnd('/')}|${paired.certificateSha256.lowercase()}"
+    private fun computerId(paired: PairedJmd) = paired.serverPeerId?.takeIf(String::isNotBlank)
+        ?: "${paired.baseUrl.trimEnd('/')}|${paired.certificateSha256.lowercase()}"
+
+    private fun syncStoredPairingCredentials() {
+        val latest = credentialStore.active() ?: return
+        if (latest.serverPeerId == pairedJmd?.serverPeerId && latest.accessToken != pairedJmd?.accessToken) {
+            pairedJmd = latest
+            jmdApiClient?.close()
+            jmdApiClient = JmdroidApiClient(latest)
+            allCommands = emptyList()
+            renderComputerList()
+            if (jmdSessionReady) loadRemoteCommands()
+        }
+    }
 
     private fun computerAddress(paired: PairedJmd): String = runCatching {
         java.net.URL(paired.baseUrl).host.ifBlank { paired.baseUrl }
@@ -1613,12 +1705,21 @@ class MainActivity : Activity() {
             }
     }
 
-    private fun startPairing(qr: PairingQr) {
+    private fun startPairing(qr: PairingQr) = startPairing(
+        JmdEndpoint(qr.baseUrl, qr.certificateSha256, "", "", "", "")
+    )
+
+    private fun startPairing(endpoint: JmdEndpoint) {
         pairingButton.isEnabled = false
         connectionStatus.text = "Solicitando aprovação no computador…"
-        backgroundExecutor.execute {
+        pairingExecutor.execute {
             try {
-                val paired = JmdroidApiClient.pair(qr, Build.MODEL.ifBlank { "Android" }, BuildConfig.VERSION_NAME)
+                val paired = JmdroidIdentityPairing.pair(
+                    endpoint,
+                    Build.MODEL.ifBlank { "Android" },
+                    BuildConfig.VERSION_NAME,
+                    status = { message -> runOnUiThread { if (!isFinishing) connectionStatus.text = message } }
+                )
                 credentialStore.save(paired)
                 runOnUiThread {
                     pairedJmd = paired
@@ -1643,16 +1744,7 @@ class MainActivity : Activity() {
     }
 
     private fun confirmPairingTransport(qr: PairingQr) {
-        if (!qr.baseUrl.startsWith("http://", ignoreCase = true)) {
-            startPairing(qr)
-            return
-        }
-        AlertDialog.Builder(this)
-            .setTitle("Usar conexão HTTP?")
-            .setMessage("O segredo de pareamento e o token serão enviados sem criptografia. Continue somente em uma rede interna confiável.")
-            .setNegativeButton("Cancelar", null)
-            .setPositiveButton("Continuar") { _, _ -> startPairing(qr) }
-            .show()
+        confirmPairingEndpoint(JmdEndpoint(qr.baseUrl, qr.certificateSha256, "", "", "", ""))
     }
 
     private fun connectToJmd(paired: PairedJmd, loadCommands: Boolean) {
@@ -1663,7 +1755,7 @@ class MainActivity : Activity() {
         connectionStatus.text = "Conectando à sessão segura do JMD…"
         refreshConnectionIndicator(false)
         JmdroidConnectionService.connect(this, reconnect = true)
-        if (loadCommands) loadRemoteCommands()
+        if (loadCommands && paired.serverPeerId.isNullOrBlank()) loadRemoteCommands()
     }
 
     private fun handleScreenShareIntent(intent: Intent?) {

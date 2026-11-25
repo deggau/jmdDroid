@@ -31,7 +31,9 @@ import okhttp3.WebSocketListener
 import okio.ByteString
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
+import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.math.max
 import kotlin.math.roundToInt
 
@@ -62,6 +64,9 @@ internal class JmdroidConnectionService : Service() {
     @Volatile private var screenHeight = 0
     @Volatile private var captureContentRect = CaptureContentRect(0, 0, 0, 0)
     private val reconnectRunnable = Runnable { connectSocket() }
+    private val identityRefreshExecutor = Executors.newSingleThreadExecutor()
+    private val identityRefreshInProgress = AtomicBoolean(false)
+    private val identityRefreshGeneration = AtomicInteger(0)
     private var stoppingService = false
     private val projectionCallback = object : MediaProjection.Callback() {
         override fun onStop() {
@@ -78,6 +83,7 @@ internal class JmdroidConnectionService : Service() {
         when (intent?.action) {
             ACTION_STOP_SERVICE -> {
                 stoppingService = true
+                identityRefreshGeneration.incrementAndGet()
                 mainHandler.removeCallbacks(reconnectRunnable)
                 stopScreenShare(sendStopped = true)
                 webSocket?.close(1000, "Desconectado pelo usuário")
@@ -121,10 +127,12 @@ internal class JmdroidConnectionService : Service() {
 
     override fun onDestroy() {
         stoppingService = true
+        identityRefreshGeneration.incrementAndGet()
         mainHandler.removeCallbacks(reconnectRunnable)
         stopScreenShare(sendStopped = true)
         webSocket?.close(1000, "Serviço encerrado")
         apiClient?.close()
+        identityRefreshExecutor.shutdownNow()
         super.onDestroy()
     }
 
@@ -134,6 +142,33 @@ internal class JmdroidConnectionService : Service() {
             stopSelf()
             return
         }
+        if (!paired.serverPeerId.isNullOrBlank()) {
+            startForegroundCompat(buildServiceNotification())
+            if (!identityRefreshInProgress.compareAndSet(false, true)) return
+            val generation = identityRefreshGeneration.get()
+            identityRefreshExecutor.execute {
+                val result = runCatching { JmdroidIdentityPairing.refresh(paired) }
+                result.getOrNull()?.let { JmdroidCredentialStore(this).save(it) }
+                mainHandler.post {
+                    identityRefreshInProgress.set(false)
+                    if (generation != identityRefreshGeneration.get() || stoppingService) return@post
+                    result.onSuccess { refreshed ->
+                        broadcastCredentialsUpdated()
+                        openSocket(refreshed)
+                    }.onFailure { error ->
+                        broadcastState(false, error.message ?: "Não foi possível confirmar a identidade do JMD.")
+                        if (error !is IdentityApprovalRequiredException && error !is JmdIdentityChangedException) {
+                            scheduleReconnect()
+                        }
+                    }
+                }
+            }
+            return
+        }
+        openSocket(paired)
+    }
+
+    private fun openSocket(paired: PairedJmd) {
         startForegroundCompat(buildServiceNotification())
         webSocket?.cancel()
         apiClient?.close()
@@ -730,6 +765,10 @@ internal class JmdroidConnectionService : Service() {
             .putExtra(EXTRA_CONNECTED, connected).putExtra(EXTRA_MESSAGE, message))
     }
 
+    private fun broadcastCredentialsUpdated() {
+        sendBroadcast(Intent(ACTION_CREDENTIALS_UPDATED).setPackage(packageName))
+    }
+
     private fun broadcastShareRequest(request: ScreenShareRequest) {
         sendBroadcast(Intent(ACTION_SCREEN_SHARE_REQUEST).setPackage(packageName)
             .putExtra(EXTRA_SHARE_ID, request.shareId)
@@ -781,6 +820,7 @@ internal class JmdroidConnectionService : Service() {
         const val ACTION_RECONNECT = "com.jmd.android.action.RECONNECT"
         const val ACTION_STOP_SERVICE = "com.jmd.android.action.STOP_SERVICE"
         const val ACTION_CONNECTION_STATE = "com.jmd.android.action.CONNECTION_STATE"
+        const val ACTION_CREDENTIALS_UPDATED = "com.jmd.android.action.CREDENTIALS_UPDATED"
         const val ACTION_SCREEN_SHARE_REQUEST = "com.jmd.android.action.SCREEN_SHARE_REQUEST"
         const val ACTION_OPEN_SCREEN_SHARE = "com.jmd.android.action.OPEN_SCREEN_SHARE"
         const val ACTION_SCREEN_SHARE_GRANTED = "com.jmd.android.action.SCREEN_SHARE_GRANTED"

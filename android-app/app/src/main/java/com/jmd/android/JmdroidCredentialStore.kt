@@ -45,7 +45,11 @@ internal class JmdroidCredentialStore(context: Context) {
     }
 
     fun save(paired: PairedJmd) {
-        val computers = loadAll().filterNot { id(it) == id(paired) } + paired
+        val computers = loadAll().filterNot { existing ->
+            id(existing) == id(paired) ||
+                (existing.serverPeerId.isNullOrBlank() &&
+                    existing.baseUrl.trimEnd('/').equals(paired.baseUrl.trimEnd('/'), ignoreCase = true))
+        } + paired
         saveAll(computers, paired)
     }
 
@@ -86,14 +90,19 @@ internal class JmdroidCredentialStore(context: Context) {
         .put("deviceId", paired.deviceId)
         .put("accessToken", paired.accessToken)
         .put("computerName", paired.computerName)
+        .put("serverPeerId", paired.serverPeerId)
+        .put("serverPublicKey", paired.serverPublicKey)
 
     private fun jsonToPaired(json: JSONObject) = PairedJmd(
         json.getString("baseUrl"), json.getString("certificateSha256"),
         json.getString("deviceId"), json.getString("accessToken"),
-        json.optString("computerName").takeIf(String::isNotBlank)
+        json.optString("computerName").takeIf(String::isNotBlank),
+        json.optString("serverPeerId").takeIf(String::isNotBlank),
+        json.optString("serverPublicKey").takeIf(String::isNotBlank)
     )
 
-    private fun id(paired: PairedJmd) = "${paired.baseUrl.trimEnd('/')}|${paired.certificateSha256.lowercase()}"
+    private fun id(paired: PairedJmd) = paired.serverPeerId?.takeIf(String::isNotBlank)
+        ?: "${paired.baseUrl.trimEnd('/')}|${paired.certificateSha256.lowercase()}"
 
     private fun getOrCreateKey(): SecretKey {
         val keyStore = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
