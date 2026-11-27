@@ -79,6 +79,11 @@ class MainActivity : Activity() {
     }
     private lateinit var credentialStore: JmdroidCredentialStore
     private lateinit var connectionStatus: TextView
+    private lateinit var activeComputerTitle: TextView
+    private lateinit var activeComputerDot: View
+    private lateinit var desktopSectionLabel: TextView
+    private lateinit var desktopSectionTitle: TextView
+    private lateinit var commandIntro: TextView
     private lateinit var computerList: LinearLayout
     private lateinit var pairingButton: Button
     private lateinit var commandContainer: LinearLayout
@@ -117,6 +122,7 @@ class MainActivity : Activity() {
                     jmdApiClient = JmdroidApiClient(updated)
                     allCommands = emptyList()
                     renderComputerList()
+                    refreshActiveComputerHeader()
                 }
                 JmdroidConnectionService.ACTION_CONNECTION_STATE -> {
                     val connected = intent.getBooleanExtra(JmdroidConnectionService.EXTRA_CONNECTED, false)
@@ -151,6 +157,8 @@ class MainActivity : Activity() {
     private var updateScreenVisible = false
     private var availableUpdate: GithubRelease? = null
     private var pendingApk: File? = null
+    private var gestureStartX = 0f
+    private var gestureStartY = 0f
     private lateinit var appMessageBanner: LinearLayout
     private lateinit var appMessageText: TextView
     private val hideAppMessage = Runnable {
@@ -175,31 +183,13 @@ class MainActivity : Activity() {
         }
 
         page.addView(buildHeader())
-        page.addView(label("CONTROLE REMOTO", accent).apply {
-            letterSpacing = 0.14f
-            setPadding(0, dp(28), 0, dp(8))
-        })
-        page.addView(label("JMD no celular", textPrimary, 28f, Typeface.create("sans-serif", Typeface.BOLD)))
-        page.addView(label(
-            "Acesse os comandos e acompanhe suas tarefas do desktop.",
-            textMuted,
-            15f
-        ).apply {
-            setLineSpacing(dp(3).toFloat(), 1f)
-            setPadding(0, dp(8), 0, dp(22))
-        })
-
-        page.addView(buildPrimaryTabs(), marginParams(top = 18))
+        page.addView(buildPrimaryTabs(), marginParams(top = 16))
         commandPanel = buildRemoteCard()
         page.addView(commandPanel, marginParams(top = 14))
         tasksPanel = buildTasksScreen()
         tasksPanel.visibility = View.GONE
         page.addView(tasksPanel, marginParams(top = 14))
 
-        page.addView(label("JMDROID  ·  ${BuildConfig.VERSION_NAME}", textMuted, 12f).apply {
-            gravity = Gravity.CENTER
-            setPadding(0, dp(24), 0, 0)
-        })
 
         val scrollView = ScrollView(this).apply {
             isFillViewport = true
@@ -253,6 +243,20 @@ class MainActivity : Activity() {
         }
         if (pairedJmd == null && credentialStore.loadAll().isNotEmpty()) scheduleHealthChecks()
         handleScreenShareIntent(intent)
+    }
+
+    override fun dispatchTouchEvent(event: android.view.MotionEvent): Boolean {
+        if (event.actionMasked == android.view.MotionEvent.ACTION_DOWN) {
+            gestureStartX = event.x
+            gestureStartY = event.y
+        } else if (event.actionMasked == android.view.MotionEvent.ACTION_UP && pairedJmd != null) {
+            val dx = event.x - gestureStartX
+            val dy = event.y - gestureStartY
+            if (kotlin.math.abs(dx) > dp(84) && kotlin.math.abs(dx) > kotlin.math.abs(dy) * 1.5f) {
+                selectMainTab(showTasks = dx > 0)
+            }
+        }
+        return super.dispatchTouchEvent(event)
     }
 
     override fun onStart() {
@@ -390,10 +394,21 @@ class MainActivity : Activity() {
         }, LinearLayout.LayoutParams(dp(46), dp(46)))
 
         addView(LinearLayout(this@MainActivity).apply {
-            orientation = LinearLayout.VERTICAL
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
             setPadding(dp(12), 0, 0, 0)
-            addView(label("JMDroid", textPrimary, 19f, Typeface.create("sans-serif-medium", Typeface.NORMAL)))
-            addView(label("JMD para Android", textMuted, 13f).apply { setPadding(0, dp(2), 0, 0) })
+            activeComputerDot = View(this@MainActivity).apply {
+                background = rounded(if (pairedJmd != null) Color.rgb(245, 166, 35) else textMuted, if (pairedJmd != null) Color.rgb(245, 166, 35) else textMuted, 8f)
+            }
+            addView(activeComputerDot, LinearLayout.LayoutParams(dp(10), dp(10)))
+            activeComputerTitle = label(pairedJmd?.let(::computerName) ?: "Conectar computador", textPrimary, 17f, Typeface.create("sans-serif-medium", Typeface.NORMAL)).apply {
+                maxLines = 1
+                ellipsize = android.text.TextUtils.TruncateAt.END
+                setPadding(dp(9), dp(12), dp(8), dp(12))
+            }
+            addView(activeComputerTitle, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+            addView(label("⌄", textMuted, 16f).apply { gravity = Gravity.CENTER }, LinearLayout.LayoutParams(dp(22), dp(40)))
+            setOnClickListener { showComputerPicker() }
         }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
 
         addView(TextView(this@MainActivity).apply {
@@ -467,7 +482,7 @@ class MainActivity : Activity() {
                 contentDescription = "Voltar"
                 setOnClickListener { closeUpdateScreen() }
             }, LinearLayout.LayoutParams(dp(48), dp(48)))
-            addView(label("Atualizações", textPrimary, 21f, Typeface.create("sans-serif-medium", Typeface.NORMAL)).apply {
+            addView(label("Sobre", textPrimary, 21f, Typeface.create("sans-serif-medium", Typeface.NORMAL)).apply {
                 setPadding(dp(8), 0, 0, 0)
             })
         }
@@ -476,8 +491,8 @@ class MainActivity : Activity() {
             letterSpacing = 0.14f
             setPadding(dp(2), dp(36), 0, dp(8))
         })
-        content.addView(label("Atualização do aplicativo", textPrimary, 27f, Typeface.create("sans-serif", Typeface.BOLD)))
-        content.addView(label("Veja se há uma versão nova do JMDroid e instale quando estiver pronto.", textMuted, 15f).apply {
+        content.addView(label("Sobre o JMDroid", textPrimary, 27f, Typeface.create("sans-serif", Typeface.BOLD)))
+        content.addView(label("Informações do aplicativo e do aparelho, além de atualizações.", textMuted, 15f).apply {
             setLineSpacing(dp(3).toFloat(), 1f)
             setPadding(0, dp(8), 0, dp(24))
         })
@@ -494,6 +509,25 @@ class MainActivity : Activity() {
             })
         }
         content.addView(versionCard)
+
+        content.addView(LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(18), dp(16), dp(18), dp(16))
+            background = rounded(card, border, 16f)
+            addView(label("APARELHO", textMuted, 11f, Typeface.create("sans-serif-medium", Typeface.NORMAL)))
+            addView(label(deviceDetails(), textPrimary, 14f).apply { setPadding(0, dp(8), 0, 0) })
+            addView(Button(this@MainActivity).apply {
+                text = "Copiar informações"
+                isAllCaps = false
+                setTextColor(accent)
+                background = rounded(card, card, 10f)
+                setOnClickListener {
+                    val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                    clipboard.setPrimaryClip(ClipData.newPlainText("Diagnóstico JMDroid", deviceDetails()))
+                    showBrandedMessage("Dados copiados")
+                }
+            }, marginParams(top = 4))
+        }, marginParams(top = 12))
 
         updateStatus = label("Toque no botão para consultar a versão mais recente.", textMuted, 14f).apply {
             setLineSpacing(dp(2).toFloat(), 1f)
@@ -544,25 +578,28 @@ class MainActivity : Activity() {
         setPadding(dp(18), dp(18), dp(18), dp(18))
         background = rounded(card, border, 16f)
 
-        addView(label("JMD DESKTOP", accent, 11f, Typeface.create("sans-serif-medium", Typeface.NORMAL)).apply {
+        desktopSectionLabel = label("JMD DESKTOP", accent, 11f, Typeface.create("sans-serif-medium", Typeface.NORMAL)).apply {
             letterSpacing = 0.12f
-        })
-        addView(label(if (pairedJmd == null) "Conecte seu computador" else "Comandos disponíveis", textPrimary, 18f, Typeface.create("sans-serif-medium", Typeface.NORMAL)).apply {
+            visibility = if (pairedJmd == null) View.VISIBLE else View.GONE
+        }
+        addView(desktopSectionLabel)
+        desktopSectionTitle = label(if (pairedJmd == null) "Conecte seu computador" else "Comandos disponíveis", textPrimary, 18f, Typeface.create("sans-serif-medium", Typeface.NORMAL)).apply {
             setPadding(0, dp(6), 0, dp(3))
-        })
-        addView(label(if (pairedJmd == null) "Conecte ao JMD desktop para consultar e executar comandos." else "Toque em um comando para informar o texto e executá-lo no computador.", textMuted, 13f).apply {
+            visibility = if (pairedJmd == null) View.VISIBLE else View.GONE
+        }
+        addView(desktopSectionTitle)
+        commandIntro = label(if (pairedJmd == null) "Conecte ao JMD desktop para consultar e executar comandos." else "Toque em um comando para informar o texto e executá-lo no computador.", textMuted, 13f).apply {
             setLineSpacing(dp(2).toFloat(), 1f)
             setPadding(0, 0, 0, dp(12))
-        })
-        addView(label("Toque em um computador para alternar. Mantenha pressionado para remover o pareamento.", textMuted, 12f).apply {
-            setPadding(0, 0, 0, dp(4))
-        })
+        }
+        addView(commandIntro)
         computerList = LinearLayout(this@MainActivity).apply {
             orientation = LinearLayout.VERTICAL
+            visibility = View.GONE
         }
         addView(computerList, marginParams(top = 0))
         val addComputerButton = Button(this@MainActivity).apply {
-            text = "＋  Conectar outro computador"
+            text = if (pairedJmd == null) "Conectar ao JMD" else "＋  Conectar outro JMD"
             textSize = 14f
             isAllCaps = false
             setTextColor(textPrimary)
@@ -573,21 +610,8 @@ class MainActivity : Activity() {
         addView(addComputerButton)
         connectionStatus = label(if (pairedJmd == null) "Nenhum JMD conectado." else "Verificando conexão com o computador…", textMuted, 12f)
         addView(connectionStatus)
-        pairingButton = Button(this@MainActivity).apply {
-            text = if (pairedJmd == null) "Conectar ao JMD" else "Reconectar ao JMD"
-            textSize = 14f
-            typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
-            isAllCaps = false
-            setTextColor(ink)
-            background = rounded(accent, accent, 12f)
-            minHeight = dp(48)
-            setOnClickListener {
-                val paired = pairedJmd
-                if (paired == null) startPairingScanner() else connectToJmd(paired, loadCommands = true)
-            }
-        }
-        addView(pairingButton, marginParams(top = 10))
-        pairingButton.visibility = View.VISIBLE
+        pairingButton = addComputerButton
+        pairingButton.visibility = if (pairedJmd == null) View.VISIBLE else View.GONE
 
         commandSearch = EditText(this@MainActivity).apply {
             hint = "Filtrar comandos"
@@ -1166,17 +1190,72 @@ class MainActivity : Activity() {
     }
 
     private fun startPairingScanner() {
-        AlertDialog.Builder(this)
-            .setTitle("Conectar ao JMD")
-            .setItems(arrayOf("Buscar computadores na rede", "Ler QR code", "Colar QR code")) { _, which ->
-                when (which) {
-                    0 -> discoverJmdComputers()
-                    1 -> startActivityForResult(Intent(this, QrScannerActivity::class.java), QR_SCAN_REQUEST)
-                    2 -> showManualPairingInput()
+        showBrandedOptions(if (pairedJmd == null) "Conectar ao JMD" else "Conectar outro JMD", "Escolha como localizar seu computador.", listOf(
+            "Buscar computadores na rede" to ::discoverJmdComputers,
+            "Ler QR code" to { startActivityForResult(Intent(this, QrScannerActivity::class.java), QR_SCAN_REQUEST) },
+            "Colar QR code" to ::showManualPairingInput
+        ))
+    }
+
+    private fun showBrandedOptions(
+        title: String,
+        subtitle: String,
+        options: List<Pair<String, () -> Unit>>,
+        longPressActions: Map<String, () -> Unit> = emptyMap()
+    ) {
+        val content = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(22), dp(22), dp(22), dp(16))
+            background = rounded(card, border, 20f)
+            addView(label(title, textPrimary, 21f, Typeface.create("sans-serif-medium", Typeface.NORMAL)))
+            addView(label(subtitle, textMuted, 14f).apply { setPadding(0, dp(6), 0, dp(14)) })
+        }
+        val dialog = AlertDialog.Builder(this).setView(content).setCancelable(true).create()
+        options.forEach { (caption, action) ->
+            content.addView(TextView(this).apply {
+                text = caption
+                textSize = 15f
+                typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+                setTextColor(textPrimary)
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(dp(16), 0, dp(16), 0)
+                background = rounded(surface, border, 12f)
+                minHeight = dp(54)
+                setOnClickListener { dialog.dismiss(); action() }
+                longPressActions[caption]?.let { removeAction ->
+                    contentDescription = "$caption. Mantenha pressionado para remover o pareamento."
+                    setOnLongClickListener { dialog.dismiss(); removeAction(); true }
                 }
-            }
-            .setNegativeButton("Cancelar", null)
-            .show()
+            }, marginParams(top = 8))
+        }
+        content.addView(TextView(this).apply {
+            text = "Cancelar"
+            textSize = 14f
+            typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+            setTextColor(accent)
+            gravity = Gravity.CENTER
+            minHeight = dp(44)
+            setOnClickListener { dialog.dismiss() }
+        }, marginParams(top = 8))
+        dialog.show()
+        dialog.window?.setBackgroundDrawableResource(android.R.color.transparent)
+    }
+
+    private fun showComputerPicker() {
+        val computers = credentialStore.loadAll()
+        if (computers.isEmpty()) {
+            startPairingScanner()
+            return
+        }
+        val removeActions = mutableMapOf<String, () -> Unit>()
+        val options = computers.map { computer ->
+            val status = if (computerOnline[computerId(computer)] == true) "Conectado" else "Desconectado"
+            val caption = "${computerName(computer)}  ·  $status"
+            removeActions[caption] = { confirmRemoveComputer(computer) }
+            caption to { selectComputer(computer) }
+        }.toMutableList()
+        options += "＋  Conectar outro JMD" to ::startPairingScanner
+        showBrandedOptions("Computadores", "Toque para conectar; mantenha pressionado para remover o pareamento.", options, removeActions)
     }
 
     private fun discoverJmdComputers() {
@@ -1191,25 +1270,18 @@ class MainActivity : Activity() {
                     emptyList()
                 }
                 if (computers.isEmpty()) {
-                    AlertDialog.Builder(this)
-                        .setTitle("Nenhum JMD encontrado")
-                        .setMessage("Confira se o JMD está aberto e os dois aparelhos estão na mesma rede local. Se o broadcast estiver bloqueado, use o QR code.")
-                        .setPositiveButton("Buscar novamente") { _, _ -> discoverJmdComputers() }
-                        .setNeutralButton("Ler QR code") { _, _ -> startActivityForResult(Intent(this, QrScannerActivity::class.java), QR_SCAN_REQUEST) }
-                        .setNegativeButton("Fechar", null)
-                        .show()
+                    showBrandedOptions("Nenhum JMD encontrado", "Confira se o JMD está aberto e os aparelhos estão na mesma rede local.", listOf(
+                        "Buscar novamente" to ::discoverJmdComputers,
+                        "Ler QR code" to { startActivityForResult(Intent(this, QrScannerActivity::class.java), QR_SCAN_REQUEST) }
+                    ))
                     return@runOnUiThread
                 }
-                val labels = computers.map { endpoint ->
+                val options = computers.map { endpoint ->
                     val host = runCatching { java.net.URI(endpoint.baseUrl).host }.getOrDefault(endpoint.baseUrl)
-                    "${endpoint.computerName} · $host\nJMD ${endpoint.appVersion.ifBlank { "versão desconhecida" }} · identidade ${endpoint.peerId.take(12)}…"
-                }.toTypedArray()
-                AlertDialog.Builder(this)
-                    .setTitle("Computadores encontrados")
-                    .setItems(labels) { _, index -> confirmPairingEndpoint(computers[index]) }
-                    .setNeutralButton("Ler QR code") { _, _ -> startActivityForResult(Intent(this, QrScannerActivity::class.java), QR_SCAN_REQUEST) }
-                    .setNegativeButton("Fechar", null)
-                    .show()
+                    "${endpoint.computerName}  ·  $host" to { confirmPairingEndpoint(endpoint) }
+                }.toMutableList()
+                options += "Ler QR code" to { startActivityForResult(Intent(this, QrScannerActivity::class.java), QR_SCAN_REQUEST) }
+                showBrandedOptions("Computadores encontrados", "Selecione o computador que deseja parear.", options)
             }
         }
     }
@@ -1402,19 +1474,7 @@ class MainActivity : Activity() {
 
     private fun showSecondaryMenu(anchor: View) {
         PopupMenu(this, anchor).apply {
-            menu.add("Informações do aparelho").setOnMenuItemClickListener {
-                AlertDialog.Builder(this@MainActivity)
-                    .setTitle("Informações do aparelho")
-                    .setMessage(deviceDetails())
-                    .setNegativeButton("Fechar", null)
-                    .setPositiveButton("Copiar dados") { _, _ ->
-                        val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                        clipboard.setPrimaryClip(ClipData.newPlainText("Diagnóstico JMDroid", deviceDetails()))
-                        showBrandedMessage("Dados copiados")
-                    }.show()
-                true
-            }
-            menu.add("Verificar atualizações").setOnMenuItemClickListener {
+            menu.add("Sobre").setOnMenuItemClickListener {
                 openUpdateScreen()
                 true
             }
@@ -1426,20 +1486,7 @@ class MainActivity : Activity() {
                 showRemoteInputAccessibilitySettings()
                 true
             }
-            if (pairedJmd == null) {
-                menu.add("Conectar a um JMD").setOnMenuItemClickListener {
-                    startPairingScanner()
-                    true
-                }
-            } else {
-                menu.add("Conectar novamente").setOnMenuItemClickListener {
-                    pairedJmd?.let { connectToJmd(it, loadCommands = true) }
-                    true
-                }
-                menu.add("Conectar outro computador").setOnMenuItemClickListener {
-                    startPairingScanner()
-                    true
-                }
+            if (pairedJmd != null) {
                 menu.add("Desconectar computador ativo").setOnMenuItemClickListener {
                     disconnectFromJmd()
                     true
@@ -1498,16 +1545,50 @@ class MainActivity : Activity() {
     private fun refreshConnectionIndicator(connected: Boolean) {
         pairedJmd?.let { computerOnline[computerId(it)] = connected }
         renderComputerList()
+        refreshActiveComputerHeader(connected)
         if (::pairingButton.isInitialized) {
-            pairingButton.text = if (pairedJmd == null) "Conectar ao JMD" else "Reconectar ao JMD"
-            pairingButton.visibility = if (pairedJmd == null || !connected) View.VISIBLE else View.GONE
+            pairingButton.text = if (pairedJmd == null) "Conectar ao JMD" else "＋  Conectar outro JMD"
+            pairingButton.visibility = if (pairedJmd == null) View.VISIBLE else View.GONE
         }
+        refreshRemoteCardState()
         if (::connectionStatus.isInitialized && pairedJmd != null) {
             connectionStatus.visibility = if (connected) View.GONE else View.VISIBLE
         }
         if (::connectionStatus.isInitialized && pairedJmd == null) {
             connectionStatus.text = if (credentialStore.loadAll().isEmpty()) "Nenhum computador conectado."
             else "Selecione um computador para conectar."
+        }
+    }
+
+    private fun refreshRemoteCardState() {
+        if (!::desktopSectionLabel.isInitialized) return
+        val awaitingFirstComputer = pairedJmd == null
+        desktopSectionLabel.visibility = if (awaitingFirstComputer) View.VISIBLE else View.GONE
+        desktopSectionTitle.visibility = if (awaitingFirstComputer) View.VISIBLE else View.GONE
+        desktopSectionTitle.text = "Conecte seu computador"
+        commandIntro.text = if (awaitingFirstComputer) {
+            "Conecte ao JMD desktop para consultar e executar comandos."
+        } else {
+            "Toque em um comando para informar o texto e executá-lo no computador."
+        }
+        pairingButton.text = if (awaitingFirstComputer) "Conectar ao JMD" else "＋  Conectar outro JMD"
+        pairingButton.visibility = if (awaitingFirstComputer) View.VISIBLE else View.GONE
+        commandSearch.visibility = if (awaitingFirstComputer) View.GONE else View.VISIBLE
+        commandContainer.visibility = if (awaitingFirstComputer) View.GONE else View.VISIBLE
+    }
+
+    private fun refreshActiveComputerHeader(connected: Boolean? = pairedJmd?.let { computerOnline[computerId(it)] }) {
+        if (!::activeComputerTitle.isInitialized) return
+        activeComputerTitle.text = pairedJmd?.let(::computerName) ?: "Conectar computador"
+        val color = when {
+            pairedJmd == null -> textMuted
+            connected == true -> Color.rgb(76, 175, 80)
+            connected == false -> Color.rgb(229, 83, 83)
+            else -> Color.rgb(245, 166, 35)
+        }
+        activeComputerDot.background = rounded(color, color, 8f)
+        activeComputerTitle.contentDescription = if (pairedJmd == null) "Conectar computador. Toque para selecionar ou adicionar um JMD." else {
+            "${computerName(pairedJmd!!)}, ${when (connected) { true -> "conectado"; false -> "desconectado"; null -> "verificando conexão" }}. Toque para trocar de computador."
         }
     }
 
@@ -1534,6 +1615,7 @@ class MainActivity : Activity() {
             runOnUiThread {
                 results.forEach { (computer, online) -> computerOnline[computerId(computer)] = online }
                 renderComputerList()
+                refreshActiveComputerHeader()
                 val activeOnline = pairedJmd?.let { computerOnline[computerId(it)] } == true
                 if (activeOnline) connectionStatus.text = "API do computador disponível · toque em um comando para executar."
                 else if (pairedJmd != null) connectionStatus.text = "Sem resposta deste computador. Verifique a rede ou tente novamente."
@@ -1552,6 +1634,7 @@ class MainActivity : Activity() {
             jmdApiClient = JmdroidApiClient(latest)
             allCommands = emptyList()
             renderComputerList()
+            refreshActiveComputerHeader()
             if (jmdSessionReady) loadRemoteCommands()
         }
     }
@@ -1627,6 +1710,7 @@ class MainActivity : Activity() {
         taskHistoryTotal = 0
         commandSearch.setText("")
         renderComputerList()
+        refreshActiveComputerHeader()
         connectToJmd(computer, loadCommands = true)
         scheduleHealthChecks()
         if (tasksPanel.visibility == View.VISIBLE) loadTasks()
@@ -1728,9 +1812,8 @@ class MainActivity : Activity() {
                     taskHistoryItems = emptyList()
                     taskHistoryTotal = 0
                     pairingButton.isEnabled = true
-                    pairingButton.visibility = View.GONE
-                    commandSearch.visibility = View.VISIBLE
-                    commandContainer.visibility = View.VISIBLE
+                    refreshActiveComputerHeader()
+                    refreshRemoteCardState()
                     connectToJmd(paired, loadCommands = true)
                     scheduleHealthChecks()
                 }
